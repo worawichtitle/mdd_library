@@ -5,16 +5,16 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 type Book struct {
-	BookID string `json:"book_id"`
+	ID     string `json:"id"`
 	Title  string `json:"title"`
 	Author string `json:"author"`
 	Status string `json:"status"`
@@ -58,10 +58,19 @@ func saveData() {
 	}
 }
 
-// File Storage Helpers
+func generateNextID() string {
+	maxID := 0
+	for idStr := range bookDB {
+		idInt, err := strconv.Atoi(idStr)
+		if err == nil && idInt > maxID {
+			maxID = idInt
+		}
+	}
+	return strconv.Itoa(maxID + 1)
+}
+
 // RabbitMQ Consumer
 
-// setupRabbitMQConsumer listens for the borrow event and updates the book status
 func setupRabbitMQConsumer() {
 	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
 	if err != nil {
@@ -75,14 +84,12 @@ func setupRabbitMQConsumer() {
 		return
 	}
 
-	// Declare the queue to receive book status updates
 	q, err := ch.QueueDeclare("book_status_queue", true, false, false, false, nil)
 	if err != nil {
 		log.Println("Failed to declare queue")
 		return
 	}
 
-	// Bind the queue to the exchange borrow service uses to publish events
 	err = ch.QueueBind(q.Name, "borrow.created", "borrow_events", false, nil)
 	if err != nil {
 		log.Println("Failed to bind queue")
@@ -97,30 +104,29 @@ func setupRabbitMQConsumer() {
 
 	log.Println("Successfully connected to RabbitMQ. Listening for borrow events...")
 
-	// Run in background
 	go func() {
 		for d := range msgs {
-			// Extract bookID from the message body
 			var event struct {
-				BookID string `json:"book_id"`
+				ID string `json:"book_id"`
 			}
 			if err := json.Unmarshal(d.Body, &event); err != nil {
 				log.Printf("Error parsing event: %v", err)
 				continue
 			}
 
-			// Update the status in memory map and save to JSON
 			dbMu.Lock()
-			if book, exists := bookDB[event.BookID]; exists {
+			if book, exists := bookDB[event.ID]; exists {
 				book.Status = "borrowed"
-				bookDB[event.BookID] = book
+				bookDB[event.ID] = book
 				saveData()
-				log.Printf("RabbitMQ Event: Updated book '%s' status to 'borrowed'", event.BookID)
+				log.Printf("RabbitMQ Event: Updated book '%s' status to 'borrowed'", event.ID)
 			}
 			dbMu.Unlock()
 		}
 	}()
 }
+
+// Main Application
 
 func main() {
 	loadData()
@@ -137,13 +143,13 @@ func main() {
 			return
 		}
 
-		newBook.BookID = uuid.New().String()
 		if newBook.Status == "" {
 			newBook.Status = "available"
 		}
 
 		dbMu.Lock()
-		bookDB[newBook.BookID] = newBook
+		newBook.ID = generateNextID()
+		bookDB[newBook.ID] = newBook
 		saveData()
 		dbMu.Unlock()
 
