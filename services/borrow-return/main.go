@@ -1,17 +1,20 @@
 package main
 
 import (
+	dbmodel "borrow-return/db"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
-	dbmodel "borrow-return/db"
-
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
+	gonanoid "github.com/matoous/go-nanoid/v2"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type BorrowEvent struct {
@@ -22,8 +25,16 @@ type BorrowEvent struct {
 	DueDate   time.Time `json:"due_date"`
 }
 
+type ReturnEvent struct {
+	BorrowID   string    `json:"borrow_id"`
+	UserID     string    `json:"user_id"`
+	BookID     string    `json:"book_id"`
+	ReturnDate time.Time `json:"return_date"`
+	DaysLate   int       `json:"days_late"`
+}
+
 func isBookAvailable(bookID string) bool {
-	url := "xxx" + bookID + "/status"
+	url := fmt.Sprintf("http://book-catalog:8082/books/%s/status", bookID)
 
 	client := &http.Client{
 		Timeout: 5 * time.Second,
@@ -40,7 +51,7 @@ func isBookAvailable(bookID string) bool {
 	}
 	json.NewDecoder(resp.Body).Decode(&result)
 
-	return result.Status == "available"
+	return strings.TrimSpace(strings.ToLower(result.Status)) == "available"
 }
 
 func main() {
@@ -51,7 +62,7 @@ func main() {
 	}
 
 	// connect rabbitMQ
-	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
+	conn, err := amqp.Dial("amqp://guest:guest@rabbitmq:5672/")
 	if err != nil {
 		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
 	}
@@ -84,18 +95,19 @@ func main() {
 			return
 		}
 
-		// check availability
-		if !isBookAvailable(req.BookID) {
-			c.JSON(400, gin.H{"error": "หนังสือเล่มนี้ถูกยืมไปแล้ว หรือไม่พร้อมให้บริการ"})
-			return
-		}
+		// check book availability
+		// if !isBookAvailable(req.BookID) {
+		// 	c.JSON(400, gin.H{"error": "หนังสือเล่มนี้ถูกยืมไปแล้ว หรือไม่พร้อมให้บริการ"})
+		// 	return
+		// }
 
 		// business logic
 		borrowDays := 7
 		now := time.Now()
 		dueDate := now.AddDate(0, 0, borrowDays)
 
-		borrowID := uuid.New().String()
+		id, _ := gonanoid.New(8)
+		borrowID := fmt.Sprintf("BRW-%s", id)
 
 		// db
 		newBorrow := dbmodel.Borrow{
@@ -150,6 +162,141 @@ func main() {
 			"borrow_id": borrowID,
 			"due_date":  dueDate.Format("2006-01-02"),
 		})
+	})
+
+	r.POST("/borrows/:id/return", func(c *gin.Context) {
+		borrowID := c.Param("id")
+
+		ctxDB, cancelDB := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelDB()
+
+		// lookup db
+		var borrow dbmodel.Borrow
+
+		err := collection.FindOne(ctxDB, bson.M{"borrow_id": borrowID, "status": "BORROWED"}).Decode(&borrow)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบข้อมูลการยืมนี้ หรือหนังสือถูกคืนไปแล้ว"})
+			return
+		}
+
+		now := time.Now()
+		daysLate := 0
+		if now.After(borrow.DueDate) {
+			duration := now.Sub(borrow.DueDate)
+			daysLate = int(duration.Hours() / 24)
+		}
+
+		update := bson.M{
+			"$set": bson.M{
+				"status":      "RETURNED",
+				"return_date": now,
+				"days_late":   daysLate,
+			},
+		}
+
+		_, err = collection.UpdateOne(ctxDB, bson.M{"borrow_id": borrowID}, update)
+		if err != nil {
+			log.Printf("Failed to update: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "อัปเดตไม่สำเร็จ"})
+			return
+		}
+
+		// publish event
+		event := ReturnEvent{
+			BorrowID:   borrow.BorrowID,
+			UserID:     borrow.UserID,
+			BookID:     borrow.BookID,
+			ReturnDate: now,
+			DaysLate:   daysLate,
+		}
+		body, _ := json.Marshal(event)
+
+		ctxMQ, cancelMQ := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelMQ()
+
+		err = ch.PublishWithContext(ctxMQ,
+			"borrow_events",
+			"borrow.returned",
+			false, false,
+			amqp.Publishing{
+				ContentType: "application/json",
+				Body:        body,
+			})
+
+		if err != nil {
+			log.Printf("Failed to publish return event: %v", err)
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":     "คืนหนังสือสำเร็จ",
+			"borrow_id":   borrow.BorrowID,
+			"return_date": now,
+			"days_late":   daysLate,
+		})
+	})
+
+	r.GET("/borrows", func(c *gin.Context) {
+		// query
+		userID := c.Query("user_id")
+		status := c.Query("status")
+
+		filter := bson.M{}
+		if userID != "" {
+			filter["user_id"] = userID
+		}
+		if status != "" {
+			filter["status"] = status
+		}
+
+		ctxDB, cancelDB := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelDB()
+
+		// find
+		cursor, err := collection.Find(ctxDB, filter)
+		if err != nil {
+			log.Printf("Failed to fetch borrows: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer cursor.Close(ctxDB)
+
+		// convert to arr
+		var borrows []dbmodel.Borrow
+		if err = cursor.All(ctxDB, &borrows); err != nil {
+			log.Printf("Failed to decode borrows: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if borrows == nil {
+			borrows = []dbmodel.Borrow{}
+		}
+
+		c.JSON(http.StatusOK, borrows)
+	})
+
+	r.GET("/borrows/:id", func(c *gin.Context) {
+		// param
+		borrowID := c.Param("id")
+
+		ctxDB, cancelDB := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelDB()
+
+		// find
+		var borrow dbmodel.Borrow
+		err := collection.FindOne(ctxDB, bson.M{"borrow_id": borrowID}).Decode(&borrow)
+
+		if err != nil {
+			// not found
+			if err == mongo.ErrNoDocuments {
+				c.JSON(http.StatusNotFound, gin.H{"error": "ไม่พบข้อมูลการยืม"})
+				return
+			}
+			// db err
+			log.Printf("Database error: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, borrow)
 	})
 
 	log.Println("Borrow Service is running on port 8081...")
