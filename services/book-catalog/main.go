@@ -18,6 +18,7 @@ type Book struct {
 	Title  string `json:"title"`
 	Author string `json:"author"`
 	Status string `json:"status"`
+	Stock  int    `json:"stock"`
 }
 
 var (
@@ -116,10 +117,20 @@ func setupRabbitMQConsumer() {
 
 			dbMu.Lock()
 			if book, exists := bookDB[event.ID]; exists {
-				book.Status = "borrowed"
-				bookDB[event.ID] = book
-				saveData()
-				log.Printf("RabbitMQ Event: Updated book '%s' status to 'borrowed'", event.ID)
+				// 2. Decrement stock if available
+				if book.Stock > 0 {
+					book.Stock--
+					if book.Stock == 0 {
+						book.Status = "unavailable"
+					} else {
+						book.Status = "available"
+					}
+					bookDB[event.ID] = book
+					saveData()
+					log.Printf("RabbitMQ Event: Book '%s' borrowed. Remaining stock: %d", event.ID, book.Stock)
+				} else {
+					log.Printf("RabbitMQ Event: Cannot borrow book '%s', already out of stock!", event.ID)
+				}
 			}
 			dbMu.Unlock()
 		}
@@ -143,8 +154,10 @@ func main() {
 			return
 		}
 
-		if newBook.Status == "" {
+		if newBook.Stock > 0 {
 			newBook.Status = "available"
+		} else {
+			newBook.Status = "unavailable"
 		}
 
 		dbMu.Lock()
@@ -174,8 +187,9 @@ func main() {
 	// Edit book
 	r.PUT("/books/:id", func(c *gin.Context) {
 		id := c.Param("id")
-		var updatedBook Book
-		if err := c.ShouldBindJSON(&updatedBook); err != nil {
+
+		var updateData map[string]interface{}
+		if err := c.ShouldBindJSON(&updateData); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 			return
 		}
@@ -189,14 +203,26 @@ func main() {
 			return
 		}
 
-		if updatedBook.Title != "" {
-			existingBook.Title = updatedBook.Title
+		if title, ok := updateData["title"].(string); ok {
+			existingBook.Title = title
 		}
-		if updatedBook.Author != "" {
-			existingBook.Author = updatedBook.Author
+		if author, ok := updateData["author"].(string); ok {
+			existingBook.Author = author
 		}
-		if updatedBook.Status != "" {
-			existingBook.Status = updatedBook.Status
+		if stockFloat, ok := updateData["stock"].(float64); ok {
+			existingBook.Stock = int(stockFloat)
+		}
+
+		// stock update should automatically adjust status
+		if existingBook.Stock > 0 {
+			existingBook.Status = "available"
+		} else {
+			existingBook.Status = "unavailable"
+		}
+
+		// allow manual status override if provided
+		if status, ok := updateData["status"].(string); ok {
+			existingBook.Status = status
 		}
 
 		bookDB[id] = existingBook
