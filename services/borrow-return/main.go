@@ -239,13 +239,23 @@ func main() {
 		// query
 		userID := c.Query("user_id")
 		status := c.Query("status")
-
+		isOverdue := c.Query("overdue")
 		filter := bson.M{}
 		if userID != "" {
 			filter["user_id"] = userID
 		}
 		if status != "" {
 			filter["status"] = status
+		}
+		if isOverdue == "true" || isOverdue == "false" {
+			filter["status"] = "BORROWED"
+			op := "$lt"
+			if isOverdue == "false" {
+				op = "$gte"
+			}
+			filter["due_date"] = bson.M{
+				op: time.Now(),
+			}
 		}
 
 		ctxDB, cancelDB := context.WithTimeout(context.Background(), 5*time.Second)
