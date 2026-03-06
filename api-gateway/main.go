@@ -27,13 +27,14 @@ func reverseProxy(target string) gin.HandlerFunc {
 func main() {
 	r := gin.Default()
 
-
-	r.Any("/users", reverseProxy(UserServiceURL))
-	r.Any("/users/*filepath", reverseProxy(UserServiceURL))
-
+	r.Any("/user", reverseProxy(UserServiceURL))
+	r.Any("/user/*filepath", reverseProxy(UserServiceURL))
 
 	r.Any("/books", reverseProxy(CatalogServiceURL))
 	r.Any("/books/*filepath", reverseProxy(CatalogServiceURL))
+
+	r.Any("/copies", reverseProxy(CatalogServiceURL))
+	r.Any("/copies/*any", reverseProxy(CatalogServiceURL))
 
 	r.Any("/borrows", reverseProxy(BorrowServiceURL))
 	r.Any("/borrows/*filepath", reverseProxy(BorrowServiceURL))
