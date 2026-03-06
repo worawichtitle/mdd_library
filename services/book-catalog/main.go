@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"fmt"
 	// "strconv"
 	"strings"
 	"sync"
@@ -79,6 +80,30 @@ func saveData() {
 	}
 }
 
+func generateISBN() string {
+	maxID := 0
+	for idStr := range booksDB {
+		var current int
+		fmt.Sscanf(idStr, "ISBN-%d", &current)
+		if current > maxID {
+			maxID = current
+		}
+	}
+	return fmt.Sprintf("ISBN-%d", maxID+1)
+}
+
+func generateBarcode() string {
+	maxID := 0
+	for idStr := range copiesDB {
+		var current int
+		fmt.Sscanf(idStr, "BC-%d", &current)
+		if current > maxID {
+			maxID = current
+		}
+	}
+	return fmt.Sprintf("BC-%d", maxID+1)
+}
+
 // func generateNextID() string {
 // 	maxID := 0
 // 	for idStr := range bookDB {
@@ -150,12 +175,13 @@ func main() {
 	// Add Book
 	r.POST("/books", func(c *gin.Context) {
 		var newBook Book
-		if err := c.ShouldBindJSON(&newBook); err != nil || newBook.ISBN == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input, ISBN required"})
+		if err := c.ShouldBindJSON(&newBook); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
 			return
 		}
 
 		dbMu.Lock()
+		newBook.ISBN = generateISBN()
 		booksDB[newBook.ISBN] = newBook
 		saveData()
 		dbMu.Unlock()
@@ -212,15 +238,16 @@ func main() {
 	// add physical copy of book
 	r.POST("/copies", func(c *gin.Context) {
 		var newCopy BookCopy
-		if err := c.ShouldBindJSON(&newCopy); err != nil || newCopy.Barcode == "" || newCopy.ISBN == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input, Barcode and ISBN required"})
+		
+		if err := c.ShouldBindJSON(&newCopy); err != nil || newCopy.ISBN == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input, ISBN required to link copy to a book"})
 			return
 		}
 
 		dbMu.Lock()
 		defer dbMu.Unlock()
 
-		// เช็คว่ามีข้อมูลหน้าปกในระบบไหม
+		// เช็คว่ามีข้อมูลหนังสือในระบบไหม
 		if _, exists := booksDB[newCopy.ISBN]; !exists {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "ISBN not found in catalog. Add book first."})
 			return
@@ -233,6 +260,7 @@ func main() {
 			newCopy.Condition = "new"
 		}
 
+		newCopy.Barcode = generateBarcode()
 		copiesDB[newCopy.Barcode] = newCopy
 		saveData()
 

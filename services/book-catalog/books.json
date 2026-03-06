@@ -13,5 +13,10 @@
     "isbn": "978-1234567890",
     "title": "Harry Potter and the Sorcerer's Stone",
     "author": "J.K. Rowling"
+  },
+  "ISBN-1": {
+    "isbn": "ISBN-1",
+    "title": "Harry Potter and the Sorcerer's Stone",
+    "author": "J.K. Rowling"
   }
 }
