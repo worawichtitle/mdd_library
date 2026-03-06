@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
+	// "strconv"
 	"strings"
 	"sync"
 
@@ -14,88 +14,93 @@ import (
 )
 
 type Book struct {
-	ID     string `json:"id"`
+	ISBN   string `json:"isbn"`
 	Title  string `json:"title"`
 	Author string `json:"author"`
-	Status string `json:"status"`
-	Stock  int    `json:"stock"`
+}
+
+type BookCopy struct {
+	Barcode   string `json:"barcode"`
+	ISBN      string `json:"isbn"`      // ชี้กลับไปหา Book
+	Status    string `json:"status"`    // available, borrowed, lost, maintanance
+	Condition string `json:"condition"` // new, good, damaged
+}
+
+type BookResponse struct {
+	Book
+	AvailableStock int `json:"available_stock"`
+	TotalStock     int `json:"total_stock"`
 }
 
 var (
-	bookDB   = make(map[string]Book)
-	dbMu     sync.RWMutex
-	dataFile = "books.json"
+	booksDB    = make(map[string]Book)
+	copiesDB   = make(map[string]BookCopy)
+	dbMu       sync.RWMutex
+	booksFile  = "books.json"
+	copiesFile = "copies.json"
 )
 
 // File Storage Helpers
 
 func loadData() {
-	file, err := os.ReadFile(dataFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			log.Println("books.json not found. Starting with an empty catalog.")
-			return
-		}
-		log.Fatalf("Error reading data file: %v", err)
+	// load Books
+	file, err := os.ReadFile(booksFile)
+	if err == nil {
+		json.Unmarshal(file, &booksDB)
+	} else if os.IsNotExist(err) {
+		log.Println("books.json not found. Starting fresh.")
 	}
 
-	err = json.Unmarshal(file, &bookDB)
-	if err != nil {
-		log.Fatalf("Error parsing JSON data: %v", err)
+	// load book copies
+	file2, err := os.ReadFile(copiesFile)
+	if err == nil {
+		json.Unmarshal(file2, &copiesDB)
+	} else if os.IsNotExist(err) {
+		log.Println("copies.json not found. Starting fresh.")
 	}
-	log.Println("Loaded books from books.json")
+	log.Println("Loaded data successfully.")
 }
 
 func saveData() {
-	data, err := json.MarshalIndent(bookDB, "", "  ")
-	if err != nil {
-		log.Printf("Error converting data to JSON: %v", err)
-		return
+	// Save Books
+	booksData, err := json.MarshalIndent(booksDB, "", "  ")
+	if err == nil {
+		os.WriteFile(booksFile, booksData, 0644)
+	} else {
+		log.Printf("Error saving books: %v", err)
 	}
 
-	err = os.WriteFile(dataFile, data, 0644)
-	if err != nil {
-		log.Printf("Error writing to data file: %v", err)
+	// Save Copies
+	copiesData, err := json.MarshalIndent(copiesDB, "", "  ")
+	if err == nil {
+		os.WriteFile(copiesFile, copiesData, 0644)
+	} else {
+		log.Printf("Error saving copies: %v", err)
 	}
 }
 
-func generateNextID() string {
-	maxID := 0
-	for idStr := range bookDB {
-		idInt, err := strconv.Atoi(idStr)
-		if err == nil && idInt > maxID {
-			maxID = idInt
-		}
-	}
-	return strconv.Itoa(maxID + 1)
-}
+// func generateNextID() string {
+// 	maxID := 0
+// 	for idStr := range bookDB {
+// 		idInt, err := strconv.Atoi(idStr)
+// 		if err == nil && idInt > maxID {
+// 			maxID = idInt
+// 		}
+// 	}
+// 	return strconv.Itoa(maxID + 1)
+// }
 
 // RabbitMQ Consumer
 
 func setupRabbitMQConsumer() {
 	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
 	if err != nil {
-		log.Println("Warning: Could not connect to RabbitMQ. Status updates won't work automatically.")
+		log.Println("Warning: Could not connect to RabbitMQ.")
 		return
 	}
-
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Println("Failed to open a channel")
-		return
-	}
-
-	q, err := ch.QueueDeclare("book_status_queue", true, false, false, false, nil)
-	if err != nil {
-		log.Println("Failed to declare queue")
-		return
-	}
-
-	err = ch.QueueBind(q.Name, "borrow.created", "borrow_events", false, nil)
-	if err != nil {
-		log.Println("Failed to bind queue")
-		return
-	}
+	ch, _ := conn.Channel()
+	q, _ := ch.QueueDeclare("book_status_queue", true, false, false, false, nil)
+	ch.QueueBind(q.Name, "borrow.created", "borrow_events", false, nil)
 
 	msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
 	if err != nil {
@@ -103,34 +108,30 @@ func setupRabbitMQConsumer() {
 		return
 	}
 
-	log.Println("Successfully connected to RabbitMQ. Listening for borrow events...")
+	log.Println("RabbitMQ Connected. Listening for borrow events (by barcode)...")
 
 	go func() {
 		for d := range msgs {
+			// เปลี่ยนมารับเป็น Barcode ของเล่มที่ถูกยืมจริงๆ
 			var event struct {
-				ID string `json:"book_id"`
+				Barcode string `json:"barcode"`
 			}
 			if err := json.Unmarshal(d.Body, &event); err != nil {
-				log.Printf("Error parsing event: %v", err)
 				continue
 			}
 
 			dbMu.Lock()
-			if book, exists := bookDB[event.ID]; exists {
-				// 2. Decrement stock if available
-				if book.Stock > 0 {
-					book.Stock--
-					if book.Stock == 0 {
-						book.Status = "unavailable"
-					} else {
-						book.Status = "available"
-					}
-					bookDB[event.ID] = book
+			if copy, exists := copiesDB[event.Barcode]; exists {
+				if copy.Status == "available" {
+					copy.Status = "borrowed"
+					copiesDB[event.Barcode] = copy
 					saveData()
-					log.Printf("RabbitMQ Event: Book '%s' borrowed. Remaining stock: %d", event.ID, book.Stock)
+					log.Printf("RabbitMQ: Barcode '%s' status updated to 'borrowed'", event.Barcode)
 				} else {
-					log.Printf("RabbitMQ Event: Cannot borrow book '%s', already out of stock!", event.ID)
+					log.Printf("RabbitMQ: Barcode '%s' is not available! Current status: %s", event.Barcode, copy.Status)
 				}
+			} else {
+				log.Printf("RabbitMQ: Barcode '%s' not found", event.Barcode)
 			}
 			dbMu.Unlock()
 		}
@@ -149,24 +150,17 @@ func main() {
 	// Add Book
 	r.POST("/books", func(c *gin.Context) {
 		var newBook Book
-		if err := c.ShouldBindJSON(&newBook); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+		if err := c.ShouldBindJSON(&newBook); err != nil || newBook.ISBN == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input, ISBN required"})
 			return
 		}
 
-		if newBook.Stock > 0 {
-			newBook.Status = "available"
-		} else {
-			newBook.Status = "unavailable"
-		}
-
 		dbMu.Lock()
-		newBook.ID = generateNextID()
-		bookDB[newBook.ID] = newBook
+		booksDB[newBook.ISBN] = newBook
 		saveData()
 		dbMu.Unlock()
 
-		c.JSON(http.StatusCreated, gin.H{"message": "Book added successfully", "book": newBook})
+		c.JSON(http.StatusCreated, gin.H{"message": "Book catalog added", "book": newBook})
 	})
 
 	// View all books
@@ -174,19 +168,80 @@ func main() {
 		dbMu.RLock()
 		defer dbMu.RUnlock()
 
-		var books []Book
-		for _, book := range bookDB {
-			books = append(books, book)
+		var results []BookResponse
+		for _, book := range booksDB {
+			available := 0
+			total := 0
+			
+			// นับ stock สดๆ จากตาราง Copies
+			for _, copy := range copiesDB {
+				if copy.ISBN == book.ISBN {
+					total++
+					if copy.Status == "available" {
+						available++
+					}
+				}
+			}
+
+			results = append(results, BookResponse{
+				Book:           book,
+				AvailableStock: available,
+				TotalStock:     total,
+			})
 		}
-		if books == nil {
-			books = []Book{}
-		}
-		c.JSON(http.StatusOK, books)
+		c.JSON(http.StatusOK, results)
 	})
 
-	// Edit book
-	r.PUT("/books/:id", func(c *gin.Context) {
-		id := c.Param("id")
+	// get copies of a specificbook
+	r.GET("/books/:isbn/copies", func(c *gin.Context) {
+		isbn := c.Param("isbn")
+
+		dbMu.RLock()
+		defer dbMu.RUnlock()
+
+		var copies []BookCopy
+		for _, copy := range copiesDB {
+			if copy.ISBN == isbn {
+				copies = append(copies, copy)
+			}
+		}
+
+		c.JSON(http.StatusOK, copies)
+	})
+
+	// add physical copy of book
+	r.POST("/copies", func(c *gin.Context) {
+		var newCopy BookCopy
+		if err := c.ShouldBindJSON(&newCopy); err != nil || newCopy.Barcode == "" || newCopy.ISBN == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input, Barcode and ISBN required"})
+			return
+		}
+
+		dbMu.Lock()
+		defer dbMu.Unlock()
+
+		// เช็คว่ามีข้อมูลหน้าปกในระบบไหม
+		if _, exists := booksDB[newCopy.ISBN]; !exists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "ISBN not found in catalog. Add book first."})
+			return
+		}
+
+		if newCopy.Status == "" {
+			newCopy.Status = "available"
+		}
+		if newCopy.Condition == "" {
+			newCopy.Condition = "new"
+		}
+
+		copiesDB[newCopy.Barcode] = newCopy
+		saveData()
+
+		c.JSON(http.StatusCreated, gin.H{"message": "Physical copy added", "copy": newCopy})
+	})
+
+	// edit book catalog (Title/Author only)
+	r.PUT("/books/:isbn", func(c *gin.Context) {
+		isbn := c.Param("isbn")
 
 		var updateData map[string]interface{}
 		if err := c.ShouldBindJSON(&updateData); err != nil {
@@ -197,7 +252,7 @@ func main() {
 		dbMu.Lock()
 		defer dbMu.Unlock()
 
-		existingBook, exists := bookDB[id]
+		existingBook, exists := booksDB[isbn]
 		if !exists {
 			c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
 			return
@@ -209,61 +264,76 @@ func main() {
 		if author, ok := updateData["author"].(string); ok {
 			existingBook.Author = author
 		}
-		if stockFloat, ok := updateData["stock"].(float64); ok {
-			existingBook.Stock = int(stockFloat)
-		}
 
-		// stock update should automatically adjust status
-		if existingBook.Stock > 0 {
-			existingBook.Status = "available"
-		} else {
-			existingBook.Status = "unavailable"
-		}
-
-		// allow manual status override if provided
-		if status, ok := updateData["status"].(string); ok {
-			existingBook.Status = status
-		}
-
-		bookDB[id] = existingBook
+		booksDB[isbn] = existingBook
 		saveData()
 
 		c.JSON(http.StatusOK, gin.H{"message": "Book updated successfully", "book": existingBook})
 	})
 
-	// Delete book
-	r.DELETE("/books/:id", func(c *gin.Context) {
-		id := c.Param("id")
+	// delete book catalog (cant delete if copies still exist)
+	r.DELETE("/books/:isbn", func(c *gin.Context) {
+		isbn := c.Param("isbn")
 
 		dbMu.Lock()
 		defer dbMu.Unlock()
 
-		if _, exists := bookDB[id]; !exists {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
+		// check if book exists
+		if _, exists := booksDB[isbn]; !exists {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Book catalog not found"})
 			return
 		}
 
-		delete(bookDB, id)
+		// check if there are still physical copies attached to this ISBN
+		for _, copy := range copiesDB {
+			if copy.ISBN == isbn {
+				c.JSON(http.StatusConflict, gin.H{
+					"error": "Cannot delete book catalog. Physical copies still exist in inventory.",
+				})
+				return
+			}
+		}
+
+		// if no copies exist, delete
+		delete(booksDB, isbn)
 		saveData()
 
-		c.JSON(http.StatusOK, gin.H{"message": "Book deleted successfully"})
+		c.JSON(http.StatusOK, gin.H{"message": "Book catalog deleted successfully"})
 	})
 
-	// check book status
-	r.GET("/books/:id/status", func(c *gin.Context) {
-		id := c.Param("id")
+	// // Delete book
+	// r.DELETE("/books/:id", func(c *gin.Context) {
+	// 	id := c.Param("id")
 
-		dbMu.RLock()
-		defer dbMu.RUnlock()
+	// 	dbMu.Lock()
+	// 	defer dbMu.Unlock()
 
-		book, exists := bookDB[id]
-		if !exists {
-			c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
-			return
-		}
+	// 	if _, exists := bookDB[id]; !exists {
+	// 		c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
+	// 		return
+	// 	}
 
-		c.JSON(http.StatusOK, gin.H{"status": book.Status})
-	})
+	// 	delete(bookDB, id)
+	// 	saveData()
+
+	// 	c.JSON(http.StatusOK, gin.H{"message": "Book deleted successfully"})
+	// })
+
+	// // check book status
+	// r.GET("/books/:id/status", func(c *gin.Context) {
+	// 	id := c.Param("id")
+
+	// 	dbMu.RLock()
+	// 	defer dbMu.RUnlock()
+
+	// 	book, exists := bookDB[id]
+	// 	if !exists {
+	// 		c.JSON(http.StatusNotFound, gin.H{"error": "Book not found"})
+	// 		return
+	// 	}
+
+	// 	c.JSON(http.StatusOK, gin.H{"status": book.Status})
+	// })
 
 	// search books
 	r.GET("/books/search", func(c *gin.Context) {
@@ -273,20 +343,66 @@ func main() {
 			return
 		}
 
-		var results []Book
 		dbMu.RLock()
 		defer dbMu.RUnlock()
 
-		for _, book := range bookDB {
+		var results []BookResponse
+		for _, book := range booksDB {
 			if strings.Contains(strings.ToLower(book.Title), query) ||
 				strings.Contains(strings.ToLower(book.Author), query) {
-				results = append(results, book)
+				
+				// นับ stock สำหรับเล่มที่ค้นเจอ
+				available := 0
+				total := 0
+				for _, copy := range copiesDB {
+					if copy.ISBN == book.ISBN {
+						total++
+						if copy.Status == "available" {
+							available++
+						}
+					}
+				}
+
+				results = append(results, BookResponse{
+					Book:           book,
+					AvailableStock: available,
+					TotalStock:     total,
+				})
 			}
 		}
-		if results == nil {
-			results = []Book{}
-		}
 		c.JSON(http.StatusOK, results)
+	})
+
+	// update book copy status/condition
+	r.PUT("/copies/:barcode", func(c *gin.Context) {
+		barcode := c.Param("barcode")
+
+		var updateData map[string]string
+		if err := c.ShouldBindJSON(&updateData); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input"})
+			return
+		}
+
+		dbMu.Lock()
+		defer dbMu.Unlock()
+
+		copy, exists := copiesDB[barcode]
+		if !exists {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Copy not found"})
+			return
+		}
+
+		if status, ok := updateData["status"]; ok {
+			copy.Status = status
+		}
+		if condition, ok := updateData["condition"]; ok {
+			copy.Condition = condition
+		}
+
+		copiesDB[barcode] = copy
+		saveData()
+
+		c.JSON(http.StatusOK, gin.H{"message": "Copy updated successfully", "copy": copy})
 	})
 
 	log.Println("Book Catalog Service running on port 8082...")

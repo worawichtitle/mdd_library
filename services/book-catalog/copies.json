@@ -1,0 +1,14 @@
+{
+  "HP-001": {
+    "barcode": "HP-001",
+    "isbn": "978-1234567890",
+    "status": "available",
+    "condition": "new"
+  },
+  "HP-002": {
+    "barcode": "HP-002",
+    "isbn": "978-1234567890",
+    "status": "available",
+    "condition": "good"
+  }
+}

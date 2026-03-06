@@ -1,14 +1,17 @@
 {
   "1": {
-    "id": "1",
+    "isbn": "",
     "title": "Harry Potter",
-    "author": "J.K. Rowling",
-    "status": "available"
+    "author": "J.K. Rowling"
   },
   "2": {
-    "id": "2",
+    "isbn": "",
     "title": "Harry Potter",
-    "author": "J.K. Rowling",
-    "status": "available"
+    "author": "J.K. Rowling"
+  },
+  "978-1234567890": {
+    "isbn": "978-1234567890",
+    "title": "Harry Potter and the Sorcerer's Stone",
+    "author": "J.K. Rowling"
   }
 }
