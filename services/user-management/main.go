@@ -136,7 +136,7 @@ func VerifyUser(c *gin.Context) {
 	for _, user := range users {
 		if user.UserID == id {
 			if user.Status == "ACTIVE" {
-				c.JSON(http.StatusOK, gin.H{"valid": true})
+				c.JSON(http.StatusOK, gin.H{"valid": true, "role": user.Role})
 				return
 			}
 			c.JSON(http.StatusOK, gin.H{"valid": false})
