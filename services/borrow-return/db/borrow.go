@@ -11,6 +11,7 @@ type Borrow struct {
 	ReturnDate *time.Time `bson:"return_date"`
 	Status     string     `bson:"status"`
 	FineAmount float64    `bson:"fine_amount"`
+	DaysLate   int        `bson:"days_late"`
 }
 
 // ตัวอย่างข้อมูล
