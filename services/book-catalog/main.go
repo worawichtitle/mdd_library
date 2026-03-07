@@ -125,7 +125,12 @@ func setupRabbitMQConsumer() {
 	}
 	ch, _ := conn.Channel()
 	q, _ := ch.QueueDeclare("book_status_queue", true, false, false, false, nil)
+	
+	// 1. Listen for Borrows
 	ch.QueueBind(q.Name, "borrow.created", "borrow_events", false, nil)
+	
+	// 2. Listen for Returns
+	ch.QueueBind(q.Name, "return.created", "borrow_events", false, nil)
 
 	msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
 	if err != nil {
@@ -133,11 +138,10 @@ func setupRabbitMQConsumer() {
 		return
 	}
 
-	log.Println("RabbitMQ Connected. Listening for borrow events (by barcode)...")
+	log.Println("RabbitMQ Connected. Listening for borrow and return events...")
 
 	go func() {
 		for d := range msgs {
-			// เปลี่ยนมารับเป็น Barcode ของเล่มที่ถูกยืมจริงๆ
 			var event struct {
 				Barcode string `json:"barcode"`
 			}
@@ -147,16 +151,27 @@ func setupRabbitMQConsumer() {
 
 			dbMu.Lock()
 			if copy, exists := copiesDB[event.Barcode]; exists {
-				if copy.Status == "available" {
-					copy.Status = "borrowed"
-					copiesDB[event.Barcode] = copy
-					saveData()
-					log.Printf("RabbitMQ: Barcode '%s' status updated to 'borrowed'", event.Barcode)
-				} else {
-					log.Printf("RabbitMQ: Barcode '%s' is not available! Current status: %s", event.Barcode, copy.Status)
+				
+				// Check which event we just received from RabbitMQ
+				if d.RoutingKey == "borrow.created" {
+					if copy.Status == "available" {
+						copy.Status = "borrowed"
+						log.Printf("RabbitMQ Event: Barcode '%s' borrowed", event.Barcode)
+					} else {
+						log.Printf("RabbitMQ Warning: Barcode '%s' is already %s!", event.Barcode, copy.Status)
+					}
+				} else if d.RoutingKey == "return.created" {
+					// If it's a return event, make the book available again
+					copy.Status = "available"
+					log.Printf("RabbitMQ Event: Barcode '%s' returned and is now available", event.Barcode)
 				}
+
+				// Save the updated copy back to the database
+				copiesDB[event.Barcode] = copy
+				saveData()
+				
 			} else {
-				log.Printf("RabbitMQ: Barcode '%s' not found", event.Barcode)
+				log.Printf("RabbitMQ Error: Barcode '%s' not found in inventory", event.Barcode)
 			}
 			dbMu.Unlock()
 		}
@@ -448,7 +463,27 @@ func main() {
 
 		c.JSON(http.StatusOK, gin.H{"status": copy.Status})
 	})
-	
+
+	// delete a specific physical copy
+	r.DELETE("/copies/:barcode", func(c *gin.Context) {
+		barcode := c.Param("barcode")
+
+		dbMu.Lock()
+		defer dbMu.Unlock()
+
+		// check if the physical copy exists
+		if _, exists := copiesDB[barcode]; !exists {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Physical copy not found"})
+			return
+		}
+
+		// delete the copy
+		delete(copiesDB, barcode)
+		saveData()
+
+		c.JSON(http.StatusOK, gin.H{"message": "Physical copy deleted successfully"})
+	})
+
 	log.Println("Book Catalog Service running on port 8082...")
 	r.Run(":8082")
 }
