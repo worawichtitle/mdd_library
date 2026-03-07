@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/sony/gobreaker"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -42,44 +44,107 @@ type BookStatusResponse struct {
 	Status string `json:"status"`
 }
 
-func isBookAvailable(bookID string) bool {
-	url := fmt.Sprintf("http://book-catalog:8082/books/%s/status", bookID)
+var userCB *gobreaker.CircuitBreaker
+var catalogCB *gobreaker.CircuitBreaker
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
+// setting ciruit breaker
+func init() {
+	settings := gobreaker.Settings{
+		MaxRequests: 1,                // Half-Open: ให้ผ่าน 1 request เพื่อ test
+		Interval:    time.Minute,      // Reset counts ทุก 1 นาที
+		Timeout:     15 * time.Second, // Open State นาน 15 วิแล้วเปลี่ยนเป็น Half-Open
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			// ถ้า Error เกิน 40% และ Request รวมเกิน 5 ครั้ง ให้ตัดวงจร (Open)
+			return counts.Requests >= 5 && failureRatio >= 0.4
+		},
 	}
 
-	resp, err := client.Get(url)
-	if err != nil || resp.StatusCode != 200 {
-		return false
-	}
-	defer resp.Body.Close()
+	// cb user management service
+	settings.Name = "User-Service-CB"
+	userCB = gobreaker.NewCircuitBreaker(settings)
 
-	var result BookStatusResponse
-	json.NewDecoder(resp.Body).Decode(&result)
-
-	return strings.TrimSpace(strings.ToLower(result.Status)) == "available"
+	// cb book catalog service
+	settings.Name = "Book-Service-CB"
+	catalogCB = gobreaker.NewCircuitBreaker(settings)
 }
 
-func verifyUser(userID string) (*UserVerifyResponse, error) {
-	url := fmt.Sprintf("http://user-management:8083/user/%s/verify", userID)
+// retry with circuit breaker
+func callAPIWithBreaker(cb *gobreaker.CircuitBreaker, url string, serviceName string) ([]byte, error) {
+	var finalErr error
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
+	// Retry 3 ครั้ง
+	for i := 0; i < 3; i++ {
+		res, cbErr := cb.Execute(func() (interface{}, error) {
+			// Setup Timeout
+			client := &http.Client{Timeout: 2 * time.Second}
+			resp, err := client.Get(url)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode >= 500 {
+				return nil, fmt.Errorf("server error: %d", resp.StatusCode)
+			}
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("not found or invalid status: %d", resp.StatusCode)
+			}
+			// อ่านข้อมูลที่ได้มาเป็น []byte แล้ว return กับ
+			body, err := io.ReadAll(resp.Body)
+			return body, err
+		})
+
+		// สำเร็จ
+		if cbErr == nil {
+			return res.([]byte), nil
+		}
+
+		// ถ้า Circuit Breaker Open อยู่มันจะ return error ทันที โดยที่ไม่ยิง request จริง
+		if cbErr == gobreaker.ErrOpenState {
+			log.Printf("%s Circuit is OPEN. Stopping retries.\n", serviceName)
+			return nil, fmt.Errorf("ระบบ %s ไม่พร้อมใช้งานชั่วคราว (Circuit Open)", serviceName)
+		}
+
+		finalErr = cbErr
+		log.Printf("%s attempt %d failed: %v. Retrying...\n", serviceName, i+1, cbErr)
+		time.Sleep(1 * time.Second) // Simple Backoff
 	}
 
-	resp, err := client.Get(url)
+	return nil, finalErr
+}
+
+// check book | call book catalog service
+func isBookAvailable(bookID string) (bool, error) {
+	var err error
+	url := fmt.Sprintf("http://book-catalog:8082/books/%s/status", bookID)
+
+	body, err := callAPIWithBreaker(catalogCB, url, "Book Catalog")
+	if err != nil {
+		return false, err
+	}
+
+	var result BookStatusResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false, err
+	}
+
+	isAvailable := strings.TrimSpace(strings.ToLower(result.Status)) == "available"
+	return isAvailable, nil
+}
+
+// verify user | call user management service
+func verifyUser(userID string) (*UserVerifyResponse, error) {
+	var err error
+	url := fmt.Sprintf("http://user-management:8083/user/%s/verify", userID)
+
+	body, err := callAPIWithBreaker(userCB, url, "User Management")
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("err: %d", resp.StatusCode)
-	}
 
 	var result UserVerifyResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, err
 	}
 
@@ -129,21 +194,21 @@ func main() {
 		}
 
 		// user verify
-		userStatus, err := verifyUser(req.UserID)
+		user, err := verifyUser(req.UserID)
 		if err != nil {
 			log.Printf("err: %v", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
-		if !userStatus.Valid {
+		if !user.Valid {
 			c.JSON(http.StatusForbidden, gin.H{"error": "บัญชีผู้ใช้ไม่สามารถทำการยืมได้ หรือถูกระงับสิทธิ์"})
 			return
 		}
 
 		// borrow quota
 		var maxBooks, borrowDays int
-		switch strings.ToUpper(userStatus.Role) {
+		switch strings.ToUpper(user.Role) {
 		case "TEACHER", "STAFF":
 			maxBooks = 10
 			borrowDays = 30
@@ -178,7 +243,6 @@ func main() {
 			})
 			return
 		}
-
 
 		// check book availability
 		// if !isBookAvailable(req.BookID) {
