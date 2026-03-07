@@ -379,6 +379,7 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
+		// publish borrow event - data consistency
 		err = ch.PublishWithContext(ctx,
 			"borrow_events",
 			"borrow.created",
@@ -388,9 +389,14 @@ func main() {
 				Body:        body,
 			})
 
+		// roll back (publish event err) - data consistency
 		if err != nil {
-			log.Printf("Failed to publish event: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"message": "Borrow saved but failed to publish event"})
+			log.Printf("Failed to publish event: %v. Rolling back DB insert...", err)
+			_, rollbackErr := collection.DeleteOne(context.Background(), bson.M{"borrow_id": borrowID})
+			if rollbackErr != nil {
+				log.Printf("CRITICAL: Failed to rollback borrow %s. Manual required: %v", borrowID, rollbackErr)
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"message": "ระบบอัปเดตสถานะหนังสือขัดข้อง กรุณาทำรายการใหม่อีกครั้ง"})
 			return
 		}
 
@@ -460,9 +466,24 @@ func main() {
 				ContentType: "application/json",
 				Body:        body,
 			})
-
+		// roll back (publish event err) - data consistency
 		if err != nil {
-			log.Printf("Failed to publish return event: %v", err)
+			log.Printf("Failed to publish event: %v. Rolling back DB update...", err)
+			rollbackUpdate := bson.M{
+				"$set": bson.M{
+					"status": "BORROWED",
+				},
+				"$unset": bson.M{
+					"return_date": "", 
+					"days_late":   "",
+				},
+			}
+			_, rollbackErr := collection.UpdateOne(context.Background(), bson.M{"borrow_id": borrowID}, rollbackUpdate)
+			if rollbackErr != nil {
+				log.Printf("CRITICAL: Failed to rollback return %s. Manual required: %v", borrowID, rollbackErr)
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"message": "ระบบอัปเดตสถานะหนังสือขัดข้อง กรุณาทำรายการใหม่อีกครั้ง"})
+			return
 		}
 
 		c.JSON(http.StatusOK, gin.H{
