@@ -15,6 +15,7 @@ import (
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sony/gobreaker"
+	"github.com/hashicorp/consul/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -42,6 +43,53 @@ type UserVerifyResponse struct {
 
 type BookStatusResponse struct {
 	Status string `json:"status"`
+}
+
+// service discovery - register
+func registerWithConsul() {
+	config := api.DefaultConfig()
+	config.Address = "consul:8500"
+	client, err := api.NewClient(config)
+	if err != nil {
+		log.Fatalf("Failed to connect to Consul: %v", err)
+	}
+
+	registration := &api.AgentServiceRegistration{
+		ID:      "borrow-return-service-1",
+		Name:    "borrow-return-service",
+		Port:    8081,
+		Address: "borrow-return",
+	}
+
+	err = client.Agent().ServiceRegister(registration)
+	if err != nil {
+		log.Fatalf("Failed to register service: %v", err)
+	}
+	log.Println("Successfully registered with Consul Service Discovery")
+}
+
+// service discovery - find
+func discoverServiceURL(serviceName string) (string, error) {
+	config := api.DefaultConfig()
+	config.Address = "consul:8500"
+	client, err := api.NewClient(config)
+	if err != nil {
+		return "", err
+	}
+
+	// ค้นหา service จากชื่อ
+	services, _, err := client.Catalog().Service(serviceName, "", nil)
+	if err != nil {
+		return "", err
+	}
+
+	if len(services) == 0 {
+		return "", fmt.Errorf("service '%s' not found in Consul", serviceName)
+	}
+
+	service := services[0]
+	url := fmt.Sprintf("http://%s:%d", service.ServiceAddress, service.ServicePort)
+	return url, nil
 }
 
 var userCB *gobreaker.CircuitBreaker
@@ -115,9 +163,14 @@ func callAPIWithBreaker(cb *gobreaker.CircuitBreaker, url string, serviceName st
 }
 
 // check book | call book catalog service
-func isBookAvailable(Barcode string) (bool, error) {
+func isBookAvailable(barcode string) (bool, error) {
 	var err error
-	url := fmt.Sprintf("http://book-catalog:8082/copies/%s/status", Barcode)
+	baseURL, err := discoverServiceURL("book-catalog-service")
+	if err != nil {
+		return false, fmt.Errorf("service discovery failed: %v", err)
+	}
+
+	url := fmt.Sprintf("%s/copies/%s/status", baseURL, barcode)
 
 	body, err := callAPIWithBreaker(catalogCB, url, "Book Catalog")
 	if err != nil {
@@ -136,7 +189,12 @@ func isBookAvailable(Barcode string) (bool, error) {
 // verify user | call user management service
 func verifyUser(userID string) (*UserVerifyResponse, error) {
 	var err error
-	url := fmt.Sprintf("http://user-management:8083/user/%s/verify", userID)
+	baseURL, err := discoverServiceURL("user-management-service")
+	if err != nil {
+		return nil, fmt.Errorf("service discovery failed: %v", err)
+	}
+
+	url := fmt.Sprintf("%s/user/%s/verify", baseURL, userID)
 
 	body, err := callAPIWithBreaker(userCB, url, "User Management")
 	if err != nil {
@@ -170,6 +228,9 @@ func connectRabbitMQ() (*amqp.Connection, error) {
 }
 
 func main() {
+	// register consul
+	registerWithConsul()
+
 	// connect mongoDB
 	collection, err := connectMongo()
 	if err != nil {

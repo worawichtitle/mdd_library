@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hashicorp/consul/api"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -32,6 +33,29 @@ type UpdateUserInput struct {
 	Password *string `json:"password" binding:"omitempty"`
 	Role     *string `json:"role" binding:"omitempty"`
 	Status   *string `json:"status" binding:"omitempty"`
+}
+
+// service discovery - register
+func registerWithConsul() {
+	config := api.DefaultConfig()
+	config.Address = "consul:8500"
+	client, err := api.NewClient(config)
+	if err != nil {
+		log.Fatalf("Failed to connect to Consul: %v", err)
+	}
+
+	registration := &api.AgentServiceRegistration{
+		ID:      "user-management-service-1",
+		Name:    "user-management-service",
+		Port:    8083,
+		Address: "user-management",
+	}
+
+	err = client.Agent().ServiceRegister(registration)
+	if err != nil {
+		log.Fatalf("Failed to register service: %v", err)
+	}
+	log.Println("Successfully registered with Consul Service Discovery")
 }
 
 var filePath = "db/user.json"
@@ -68,6 +92,9 @@ func generateNextID(users []User) string {
 }
 
 func main() {
+	// register consul
+	registerWithConsul()
+
 	// set up RabbitMQ
 	conn, err := amqp.Dial("amqp://guest:guest@rabbitmq:5672/")
 	if err != nil {

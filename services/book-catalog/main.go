@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hashicorp/consul/api"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -33,6 +34,29 @@ type BookResponse struct {
 	Book
 	AvailableStock int `json:"available_stock"`
 	TotalStock     int `json:"total_stock"`
+}
+
+// service discovery - register
+func registerWithConsul() {
+	config := api.DefaultConfig()
+	config.Address = "consul:8500"
+	client, err := api.NewClient(config)
+	if err != nil {
+		log.Fatalf("Failed to connect to Consul: %v", err)
+	}
+
+	registration := &api.AgentServiceRegistration{
+		ID:      "book-catalog-service-1",
+		Name:    "book-catalog-service",
+		Port:    8082,
+		Address: "book-catalog",
+	}
+
+	err = client.Agent().ServiceRegister(registration)
+	if err != nil {
+		log.Fatalf("Failed to register service: %v", err)
+	}
+	log.Println("Successfully registered with Consul Service Discovery")
 }
 
 var (
@@ -129,7 +153,7 @@ func setupRabbitMQConsumer() {
 			log.Println("Catalog Service successfully connected to RabbitMQ!")
 			break
 		}
-		
+
 		log.Printf("Catalog trying to connect RabbitMQ (attempt %d/10)...", i+1)
 		time.Sleep(3 * time.Second)
 	}
@@ -139,7 +163,7 @@ func setupRabbitMQConsumer() {
 		return
 	}
 
-	ch, err:= conn.Channel()
+	ch, err := conn.Channel()
 	if err != nil {
 		log.Printf("RabbitMQ Channel Error: %v", err)
 		return
@@ -158,9 +182,7 @@ func setupRabbitMQConsumer() {
 		log.Printf("Queue Declare Error: %v", err)
 		return
 	}
-	ch, _ := conn.Channel()
-	q, _ := ch.QueueDeclare("book_status_queue", true, false, false, false, nil)
-	
+
 	// 1. Listen for Borrows
 	ch.QueueBind(q.Name, "borrow.created", "borrow_events", false, nil)
 
@@ -216,6 +238,9 @@ func setupRabbitMQConsumer() {
 // Main Application
 
 func main() {
+	// register consul
+	registerWithConsul()
+
 	loadData()
 
 	setupRabbitMQConsumer()

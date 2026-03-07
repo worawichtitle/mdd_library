@@ -9,6 +9,7 @@ services:
         - borrow-return
         - book-catalog
         - user-management
+        - consul
       networks:
         - library-net
 
@@ -20,6 +21,7 @@ services:
     depends_on:
       - mongodb
       - rabbitmq
+      - consul
     networks:
       - library-net
 
@@ -30,6 +32,7 @@ services:
       restart: always
       depends_on:
       - rabbitmq
+      - consul
       networks:
         - library-net
 
@@ -40,9 +43,16 @@ services:
       restart: always
       depends_on:
       - rabbitmq
+      - consul
       networks:
         - library-net
-
+  consul:
+    image: hashicorp/consul:latest
+    ports:
+      - "8500:8500"
+    command: "agent -dev -client 0.0.0.0"
+    networks:
+      - library-net
   mongodb:
     image: mongo:7
     ports:
