@@ -45,6 +45,11 @@ type BookStatusResponse struct {
 	Status string `json:"status"`
 }
 
+type HTTPResult struct {
+	Body       []byte
+	StatusCode int
+}
+
 // service discovery - register
 func registerWithConsul() {
 	config := api.DefaultConfig()
@@ -135,17 +140,18 @@ func callAPIWithBreaker(cb *gobreaker.CircuitBreaker, url string, serviceName st
 			if resp.StatusCode >= 500 {
 				return nil, fmt.Errorf("server error: %d", resp.StatusCode)
 			}
-			if resp.StatusCode != http.StatusOK {
-				return nil, fmt.Errorf("not found or invalid status: %d", resp.StatusCode)
-			}
-			// อ่านข้อมูลที่ได้มาเป็น []byte แล้ว return กับ
+
 			body, err := io.ReadAll(resp.Body)
-			return body, err
+			return HTTPResult{Body: body, StatusCode: resp.StatusCode}, err
 		})
 
 		// สำเร็จ
 		if cbErr == nil {
-			return res.([]byte), nil
+			httpRes := res.(HTTPResult)
+			if httpRes.StatusCode >= 400 && httpRes.StatusCode < 500 {
+				return nil, fmt.Errorf("error: %d", httpRes.StatusCode)
+			}
+			return httpRes.Body, nil
 		}
 
 		// ถ้า Circuit Breaker Open อยู่มันจะ return error ทันที โดยที่ไม่ยิง request จริง
