@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"github.com/sony/gobreaker"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -33,25 +35,120 @@ type ReturnEvent struct {
 	DaysLate   int       `json:"days_late"`
 }
 
-func isBookAvailable(bookID string) bool {
+type UserVerifyResponse struct {
+	Valid bool   `json:"valid"`
+	Role  string `json:"role"`
+}
+
+type BookStatusResponse struct {
+	Status string `json:"status"`
+}
+
+var userCB *gobreaker.CircuitBreaker
+var catalogCB *gobreaker.CircuitBreaker
+
+// setting ciruit breaker
+func init() {
+	settings := gobreaker.Settings{
+		MaxRequests: 1,                // Half-Open: ให้ผ่าน 1 request เพื่อ test
+		Interval:    time.Minute,      // Reset counts ทุก 1 นาที
+		Timeout:     15 * time.Second, // Open State นาน 15 วิแล้วเปลี่ยนเป็น Half-Open
+		ReadyToTrip: func(counts gobreaker.Counts) bool {
+			failureRatio := float64(counts.TotalFailures) / float64(counts.Requests)
+			// ถ้า Error เกิน 40% และ Request รวมเกิน 5 ครั้ง ให้ตัดวงจร (Open)
+			return counts.Requests >= 5 && failureRatio >= 0.4
+		},
+	}
+
+	// cb user management service
+	settings.Name = "User-Service-CB"
+	userCB = gobreaker.NewCircuitBreaker(settings)
+
+	// cb book catalog service
+	settings.Name = "Book-Service-CB"
+	catalogCB = gobreaker.NewCircuitBreaker(settings)
+}
+
+// retry with circuit breaker
+func callAPIWithBreaker(cb *gobreaker.CircuitBreaker, url string, serviceName string) ([]byte, error) {
+	var finalErr error
+
+	// Retry 3 ครั้ง
+	for i := 0; i < 3; i++ {
+		res, cbErr := cb.Execute(func() (interface{}, error) {
+			// Setup Timeout
+			client := &http.Client{Timeout: 2 * time.Second}
+			resp, err := client.Get(url)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode >= 500 {
+				return nil, fmt.Errorf("server error: %d", resp.StatusCode)
+			}
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("not found or invalid status: %d", resp.StatusCode)
+			}
+			// อ่านข้อมูลที่ได้มาเป็น []byte แล้ว return กับ
+			body, err := io.ReadAll(resp.Body)
+			return body, err
+		})
+
+		// สำเร็จ
+		if cbErr == nil {
+			return res.([]byte), nil
+		}
+
+		// ถ้า Circuit Breaker Open อยู่มันจะ return error ทันที โดยที่ไม่ยิง request จริง
+		if cbErr == gobreaker.ErrOpenState {
+			log.Printf("%s Circuit is OPEN. Stopping retries.\n", serviceName)
+			return nil, fmt.Errorf("ระบบ %s ไม่พร้อมใช้งานชั่วคราว (Circuit Open)", serviceName)
+		}
+
+		finalErr = cbErr
+		log.Printf("%s attempt %d failed: %v. Retrying...\n", serviceName, i+1, cbErr)
+		time.Sleep(1 * time.Second) // Simple Backoff
+	}
+
+	return nil, finalErr
+}
+
+// check book | call book catalog service
+func isBookAvailable(bookID string) (bool, error) {
+	var err error
 	url := fmt.Sprintf("http://book-catalog:8082/books/%s/status", bookID)
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
+	body, err := callAPIWithBreaker(catalogCB, url, "Book Catalog")
+	if err != nil {
+		return false, err
 	}
 
-	resp, err := client.Get(url)
-	if err != nil || resp.StatusCode != 200 {
-		return false
+	var result BookStatusResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return false, err
 	}
-	defer resp.Body.Close()
 
-	var result struct {
-		Status string `json:"status"`
+	isAvailable := strings.TrimSpace(strings.ToLower(result.Status)) == "available"
+	return isAvailable, nil
+}
+
+// verify user | call user management service
+func verifyUser(userID string) (*UserVerifyResponse, error) {
+	var err error
+	url := fmt.Sprintf("http://user-management:8083/user/%s/verify", userID)
+
+	body, err := callAPIWithBreaker(userCB, url, "User Management")
+	if err != nil {
+		return nil, err
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
 
-	return strings.TrimSpace(strings.ToLower(result.Status)) == "available"
+	var result UserVerifyResponse
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
 }
 
 func main() {
@@ -84,6 +181,7 @@ func main() {
 	r := gin.Default()
 
 	// endpoint
+	//borrow book
 	r.POST("/borrows", func(c *gin.Context) {
 		var req struct {
 			UserID string `json:"user_id" binding:"required"`
@@ -95,21 +193,71 @@ func main() {
 			return
 		}
 
+		// user verify
+		user, err := verifyUser(req.UserID)
+		if err != nil {
+			log.Printf("err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		if !user.Valid {
+			c.JSON(http.StatusForbidden, gin.H{"error": "บัญชีผู้ใช้ไม่สามารถทำการยืมได้ หรือถูกระงับสิทธิ์"})
+			return
+		}
+
+		// borrow quota
+		var maxBooks, borrowDays int
+		switch strings.ToUpper(user.Role) {
+		case "TEACHER", "STAFF":
+			maxBooks = 10
+			borrowDays = 30
+		case "STUDENT":
+			maxBooks = 5
+			borrowDays = 14
+		case "GUEST":
+			maxBooks = 1
+			borrowDays = 7
+		default:
+			maxBooks = 1
+			borrowDays = 7
+		}
+
+		// check current borrow
+		ctxDB, cancelDB := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelDB()
+
+		borrowCount, err := collection.CountDocuments(ctxDB, bson.M{
+			"user_id": req.UserID,
+			"status":  "BORROWED",
+		})
+		if err != nil {
+			log.Printf("err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		if int(borrowCount) >= maxBooks {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": fmt.Sprintf("คุณไม่สามารถยืมได้ เนื่องจากยืมหนังสือครบโควต้าแล้ว (%d เล่ม)", maxBooks),
+			})
+			return
+		}
+
 		// check book availability
 		// if !isBookAvailable(req.BookID) {
 		// 	c.JSON(400, gin.H{"error": "หนังสือเล่มนี้ถูกยืมไปแล้ว หรือไม่พร้อมให้บริการ"})
 		// 	return
 		// }
 
-		// business logic
-		borrowDays := 7
+		// save db
 		now := time.Now()
 		dueDate := now.AddDate(0, 0, borrowDays)
 
-		id, _ := gonanoid.New(8)
+		alphabet := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		id, _ := gonanoid.Generate(alphabet, 10)
 		borrowID := fmt.Sprintf("BRW-%s", id)
 
-		// db
 		newBorrow := dbmodel.Borrow{
 			BorrowID:   borrowID,
 			UserID:     req.UserID,
@@ -119,8 +267,6 @@ func main() {
 			Status:     "BORROWED",
 			FineAmount: 0,
 		}
-		ctxDB, cancelDB := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancelDB()
 
 		_, err = collection.InsertOne(ctxDB, newBorrow)
 		if err != nil {
@@ -164,6 +310,7 @@ func main() {
 		})
 	})
 
+	//return book
 	r.POST("/borrows/:id/return", func(c *gin.Context) {
 		borrowID := c.Param("id")
 
@@ -235,6 +382,7 @@ func main() {
 		})
 	})
 
+	//get borrows
 	r.GET("/borrows", func(c *gin.Context) {
 		// query
 		userID := c.Query("user_id")
@@ -284,6 +432,7 @@ func main() {
 		c.JSON(http.StatusOK, borrows)
 	})
 
+	//get borrow by id
 	r.GET("/borrows/:id", func(c *gin.Context) {
 		// param
 		borrowID := c.Param("id")
