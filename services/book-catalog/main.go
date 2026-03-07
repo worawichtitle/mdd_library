@@ -129,7 +129,7 @@ func setupRabbitMQConsumer() {
 	// 1. Listen for Borrows
 	ch.QueueBind(q.Name, "borrow.created", "borrow_events", false, nil)
 	
-	// 2. Listen for Returns (ADD THIS)
+	// 2. Listen for Returns
 	ch.QueueBind(q.Name, "return.created", "borrow_events", false, nil)
 
 	msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
@@ -462,6 +462,26 @@ func main() {
 		}
 
 		c.JSON(http.StatusOK, gin.H{"status": copy.Status})
+	})
+
+	// delete a specific physical copy
+	r.DELETE("/copies/:barcode", func(c *gin.Context) {
+		barcode := c.Param("barcode")
+
+		dbMu.Lock()
+		defer dbMu.Unlock()
+
+		// check if the physical copy exists
+		if _, exists := copiesDB[barcode]; !exists {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Physical copy not found"})
+			return
+		}
+
+		// delete the copy
+		delete(copiesDB, barcode)
+		saveData()
+
+		c.JSON(http.StatusOK, gin.H{"message": "Physical copy deleted successfully"})
 	})
 
 	log.Println("Book Catalog Service running on port 8082...")
