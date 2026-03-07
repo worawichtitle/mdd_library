@@ -228,7 +228,7 @@ func UpdateUser(c *gin.Context) {
 			}
 
 			if input.Status != nil {
-				users[i].Status = *input.Status
+				users[i].Status = strings.ToUpper(*input.Status)
 			}
 
 			if input.Role != nil {

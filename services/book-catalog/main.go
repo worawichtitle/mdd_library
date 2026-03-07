@@ -2,10 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"fmt"
+
 	// "strconv"
 	"strings"
 	"sync"
@@ -16,8 +17,8 @@ import (
 
 type Book struct {
 	ISBN   string `json:"isbn"`
-	Title  string `json:"title"`
-	Author string `json:"author"`
+	Title  string `json:"title" binding:"required"`
+	Author string `json:"author" binding:"required"`
 }
 
 type BookCopy struct {
@@ -125,10 +126,10 @@ func setupRabbitMQConsumer() {
 	}
 	ch, _ := conn.Channel()
 	q, _ := ch.QueueDeclare("book_status_queue", true, false, false, false, nil)
-	
+
 	// 1. Listen for Borrows
 	ch.QueueBind(q.Name, "borrow.created", "borrow_events", false, nil)
-	
+
 	// 2. Listen for Returns
 	ch.QueueBind(q.Name, "return.created", "borrow_events", false, nil)
 
@@ -151,7 +152,7 @@ func setupRabbitMQConsumer() {
 
 			dbMu.Lock()
 			if copy, exists := copiesDB[event.Barcode]; exists {
-				
+
 				// Check which event we just received from RabbitMQ
 				if d.RoutingKey == "borrow.created" {
 					if copy.Status == "available" {
@@ -169,7 +170,7 @@ func setupRabbitMQConsumer() {
 				// Save the updated copy back to the database
 				copiesDB[event.Barcode] = copy
 				saveData()
-				
+
 			} else {
 				log.Printf("RabbitMQ Error: Barcode '%s' not found in inventory", event.Barcode)
 			}
@@ -213,7 +214,7 @@ func main() {
 		for _, book := range booksDB {
 			available := 0
 			total := 0
-			
+
 			// นับ stock สดๆ จากตาราง Copies
 			for _, copy := range copiesDB {
 				if copy.ISBN == book.ISBN {
@@ -253,7 +254,7 @@ func main() {
 	// add physical copy of book
 	r.POST("/copies", func(c *gin.Context) {
 		var newCopy BookCopy
-		
+
 		if err := c.ShouldBindJSON(&newCopy); err != nil || newCopy.ISBN == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input, ISBN required to link copy to a book"})
 			return
@@ -393,7 +394,7 @@ func main() {
 		for _, book := range booksDB {
 			if strings.Contains(strings.ToLower(book.Title), query) ||
 				strings.Contains(strings.ToLower(book.Author), query) {
-				
+
 				// นับ stock สำหรับเล่มที่ค้นเจอ
 				available := 0
 				total := 0
