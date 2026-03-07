@@ -254,7 +254,8 @@ func main() {
 		now := time.Now()
 		dueDate := now.AddDate(0, 0, borrowDays)
 
-		id, _ := gonanoid.New(8)
+		alphabet := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		id, _ := gonanoid.Generate(alphabet, 10)
 		borrowID := fmt.Sprintf("BRW-%s", id)
 
 		newBorrow := dbmodel.Borrow{
