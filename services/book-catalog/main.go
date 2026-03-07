@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"fmt"
+	"time"
+
 	// "strconv"
 	"strings"
 	"sync"
@@ -118,19 +120,50 @@ func generateBarcode() string {
 // RabbitMQ Consumer
 
 func setupRabbitMQConsumer() {
-	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
+	var conn *amqp.Connection
+	var err error
+
+	for i := 0; i < 10; i++ {
+		conn, err = amqp.Dial("amqp://guest:guest@rabbitmq:5672/")
+		if err == nil {
+			log.Println("Catalog Service successfully connected to RabbitMQ!")
+			break
+		}
+		
+		log.Printf("Catalog trying to connect RabbitMQ (attempt %d/10)...", i+1)
+		time.Sleep(3 * time.Second)
+	}
+
 	if err != nil {
-		log.Println("Warning: Could not connect to RabbitMQ.")
+		log.Printf("Failed to connect to RabbitMQ after retries: %v", err)
 		return
 	}
-	ch, _ := conn.Channel()
-	q, _ := ch.QueueDeclare("book_status_queue", true, false, false, false, nil)
-	
+
+	ch, err:= conn.Channel()
+	if err != nil {
+		log.Printf("RabbitMQ Channel Error: %v", err)
+		return
+	}
+	err = ch.ExchangeDeclare(
+		"borrow_events",
+		"topic",
+		true, false, false, false, nil,
+	)
+	if err != nil {
+		log.Printf("Exchange Declare Error: %v", err)
+		return
+	}
+	q, err := ch.QueueDeclare("book_status_queue", true, false, false, false, nil)
+	if err != nil {
+		log.Printf("Queue Declare Error: %v", err)
+		return
+	}
+
 	// 1. Listen for Borrows
 	ch.QueueBind(q.Name, "borrow.created", "borrow_events", false, nil)
-	
+
 	// 2. Listen for Returns
-	ch.QueueBind(q.Name, "return.created", "borrow_events", false, nil)
+	ch.QueueBind(q.Name, "borrow.returned", "borrow_events", false, nil)
 
 	msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
 	if err != nil {
@@ -151,7 +184,7 @@ func setupRabbitMQConsumer() {
 
 			dbMu.Lock()
 			if copy, exists := copiesDB[event.Barcode]; exists {
-				
+
 				// Check which event we just received from RabbitMQ
 				if d.RoutingKey == "borrow.created" {
 					if copy.Status == "available" {
@@ -160,7 +193,7 @@ func setupRabbitMQConsumer() {
 					} else {
 						log.Printf("RabbitMQ Warning: Barcode '%s' is already %s!", event.Barcode, copy.Status)
 					}
-				} else if d.RoutingKey == "return.created" {
+				} else if d.RoutingKey == "borrow.returned" {
 					// If it's a return event, make the book available again
 					copy.Status = "available"
 					log.Printf("RabbitMQ Event: Barcode '%s' returned and is now available", event.Barcode)
@@ -169,7 +202,7 @@ func setupRabbitMQConsumer() {
 				// Save the updated copy back to the database
 				copiesDB[event.Barcode] = copy
 				saveData()
-				
+
 			} else {
 				log.Printf("RabbitMQ Error: Barcode '%s' not found in inventory", event.Barcode)
 			}
@@ -213,7 +246,7 @@ func main() {
 		for _, book := range booksDB {
 			available := 0
 			total := 0
-			
+
 			// นับ stock สดๆ จากตาราง Copies
 			for _, copy := range copiesDB {
 				if copy.ISBN == book.ISBN {
@@ -253,7 +286,7 @@ func main() {
 	// add physical copy of book
 	r.POST("/copies", func(c *gin.Context) {
 		var newCopy BookCopy
-		
+
 		if err := c.ShouldBindJSON(&newCopy); err != nil || newCopy.ISBN == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input, ISBN required to link copy to a book"})
 			return
@@ -393,7 +426,7 @@ func main() {
 		for _, book := range booksDB {
 			if strings.Contains(strings.ToLower(book.Title), query) ||
 				strings.Contains(strings.ToLower(book.Author), query) {
-				
+
 				// นับ stock สำหรับเล่มที่ค้นเจอ
 				available := 0
 				total := 0
