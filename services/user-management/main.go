@@ -91,7 +91,7 @@ func main() {
 		api.GET("/:id", GetUserByID)       // ดูรายคน
 		api.GET("/:id/verify", VerifyUser) // ตรวจสอบผู้ใช้
 		api.POST("", CreateUser)           // เพิ่มคนใหม่
-		api.PATCH("/:id", UpdateUser)      // แก้ไขข้อมูล
+		api.PUT("/:id", UpdateUser)        // แก้ไขข้อมูล
 		api.DELETE("/:id", DeleteUser)     // ลบข้อมูล
 	}
 
@@ -194,7 +194,7 @@ func CreateUser(c *gin.Context) {
 	c.JSON(http.StatusCreated, newUser)
 }
 
-// PATCH /user/:id
+// PUT /user/:id
 func UpdateUser(c *gin.Context) {
 	id := c.Param("id")
 	var input UpdateUserInput
