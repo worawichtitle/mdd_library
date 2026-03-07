@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hashicorp/consul/api"
 	gonanoid "github.com/matoous/go-nanoid/v2"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sony/gobreaker"
-	"github.com/hashicorp/consul/api"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -282,6 +282,10 @@ func main() {
 		user, err := verifyUser(req.UserID)
 		if err != nil {
 			log.Printf("err: %v", err)
+			if strings.Contains(err.Error(), "404") {
+				c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -333,6 +337,10 @@ func main() {
 		isAvailable, err := isBookAvailable(req.Barcode)
 		if err != nil {
 			log.Printf("err: %v", err)
+			if strings.Contains(err.Error(), "404") {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Copy not found"})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -474,7 +482,7 @@ func main() {
 					"status": "BORROWED",
 				},
 				"$unset": bson.M{
-					"return_date": "", 
+					"return_date": "",
 					"days_late":   "",
 				},
 			}
