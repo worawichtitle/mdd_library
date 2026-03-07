@@ -33,6 +33,15 @@ type ReturnEvent struct {
 	DaysLate   int       `json:"days_late"`
 }
 
+type UserVerifyResponse struct {
+	Valid bool   `json:"valid"`
+	Role  string `json:"role"`
+}
+
+type BookStatusResponse struct {
+	Status string `json:"status"`
+}
+
 func isBookAvailable(bookID string) bool {
 	url := fmt.Sprintf("http://book-catalog:8082/books/%s/status", bookID)
 
@@ -46,12 +55,35 @@ func isBookAvailable(bookID string) bool {
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		Status string `json:"status"`
-	}
+	var result BookStatusResponse
 	json.NewDecoder(resp.Body).Decode(&result)
 
 	return strings.TrimSpace(strings.ToLower(result.Status)) == "available"
+}
+
+func verifyUser(userID string) (*UserVerifyResponse, error) {
+	url := fmt.Sprintf("http://user-management:8083/user/%s/verify", userID)
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("err: %d", resp.StatusCode)
+	}
+
+	var result UserVerifyResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return &result, nil
 }
 
 func main() {
@@ -84,6 +116,7 @@ func main() {
 	r := gin.Default()
 
 	// endpoint
+	//borrow book
 	r.POST("/borrows", func(c *gin.Context) {
 		var req struct {
 			UserID string `json:"user_id" binding:"required"`
@@ -95,21 +128,71 @@ func main() {
 			return
 		}
 
+		// user verify
+		userStatus, err := verifyUser(req.UserID)
+		if err != nil {
+			log.Printf("err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		if !userStatus.Valid {
+			c.JSON(http.StatusForbidden, gin.H{"error": "บัญชีผู้ใช้ไม่สามารถทำการยืมได้ หรือถูกระงับสิทธิ์"})
+			return
+		}
+
+		// borrow quota
+		var maxBooks, borrowDays int
+		switch strings.ToUpper(userStatus.Role) {
+		case "TEACHER", "STAFF":
+			maxBooks = 10
+			borrowDays = 30
+		case "STUDENT":
+			maxBooks = 5
+			borrowDays = 14
+		case "GUEST":
+			maxBooks = 1
+			borrowDays = 7
+		default:
+			maxBooks = 1
+			borrowDays = 7
+		}
+
+		// check current borrow
+		ctxDB, cancelDB := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancelDB()
+
+		borrowCount, err := collection.CountDocuments(ctxDB, bson.M{
+			"user_id": req.UserID,
+			"status":  "BORROWED",
+		})
+		if err != nil {
+			log.Printf("err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		if int(borrowCount) >= maxBooks {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": fmt.Sprintf("คุณไม่สามารถยืมได้ เนื่องจากยืมหนังสือครบโควต้าแล้ว (%d เล่ม)", maxBooks),
+			})
+			return
+		}
+
+
 		// check book availability
 		// if !isBookAvailable(req.BookID) {
 		// 	c.JSON(400, gin.H{"error": "หนังสือเล่มนี้ถูกยืมไปแล้ว หรือไม่พร้อมให้บริการ"})
 		// 	return
 		// }
 
-		// business logic
-		borrowDays := 7
+		// save db
 		now := time.Now()
 		dueDate := now.AddDate(0, 0, borrowDays)
 
 		id, _ := gonanoid.New(8)
 		borrowID := fmt.Sprintf("BRW-%s", id)
 
-		// db
 		newBorrow := dbmodel.Borrow{
 			BorrowID:   borrowID,
 			UserID:     req.UserID,
@@ -119,8 +202,6 @@ func main() {
 			Status:     "BORROWED",
 			FineAmount: 0,
 		}
-		ctxDB, cancelDB := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancelDB()
 
 		_, err = collection.InsertOne(ctxDB, newBorrow)
 		if err != nil {
@@ -164,6 +245,7 @@ func main() {
 		})
 	})
 
+	//return book
 	r.POST("/borrows/:id/return", func(c *gin.Context) {
 		borrowID := c.Param("id")
 
@@ -235,6 +317,7 @@ func main() {
 		})
 	})
 
+	//get borrows
 	r.GET("/borrows", func(c *gin.Context) {
 		// query
 		userID := c.Query("user_id")
@@ -284,6 +367,7 @@ func main() {
 		c.JSON(http.StatusOK, borrows)
 	})
 
+	//get borrow by id
 	r.GET("/borrows/:id", func(c *gin.Context) {
 		// param
 		borrowID := c.Param("id")
