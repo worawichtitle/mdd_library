@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,15 +21,17 @@ type User struct {
 	Email     string `json:"email" binding:"required,email"`
 	Password  string `json:"password" binding:"required"`
 	Status    string `json:"status"` // ACTIVE, SUSPENDED
+	Role      string `json:"role"`   // GUEST, STUDENT, TEACHER, STAFF
 	CreatedAt string `json:"created_at"`
 }
 
 // สำหรับรับข้อมูลที่ต้องการเก็บ ไม่ต้องเปลี่ยนทุกตัว
 type UpdateUserInput struct {
-	Name     *string `json:"name"`
-	Email    *string `json:"email"`
-	Password *string `json:"password"`
-	Status   *string `json:"status"`
+	Name     *string `json:"name" binding:"omitempty"`
+	Email    *string `json:"email" binding:"omitempty,email"`
+	Password *string `json:"password" binding:"omitempty"`
+	Role     *string `json:"role" binding:"omitempty"`
+	Status   *string `json:"status" binding:"omitempty"`
 }
 
 var filePath = "db/user.json"
@@ -133,7 +136,7 @@ func VerifyUser(c *gin.Context) {
 	for _, user := range users {
 		if user.UserID == id {
 			if user.Status == "ACTIVE" {
-				c.JSON(http.StatusOK, gin.H{"valid": true})
+				c.JSON(http.StatusOK, gin.H{"valid": true, "role": user.Role})
 				return
 			}
 			c.JSON(http.StatusOK, gin.H{"valid": false})
@@ -175,6 +178,11 @@ func CreateUser(c *gin.Context) {
 	newUser.UserID = generateNextID(users)
 	newUser.Status = "ACTIVE"
 	newUser.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	if newUser.Role == "" {
+		newUser.Role = "GUEST"
+	} else {
+		newUser.Role = strings.ToUpper(newUser.Role)
+	}
 
 	// เพิ่มผู้ใช้
 	users = append(users, newUser)
@@ -210,11 +218,21 @@ func UpdateUser(c *gin.Context) {
 			}
 
 			if input.Email != nil {
+				for _, user := range users {
+					if user.Email == *input.Email {
+						c.JSON(http.StatusBadRequest, gin.H{"error": "Email already exists"})
+						return
+					}
+				}
 				users[i].Email = *input.Email
 			}
 
 			if input.Status != nil {
 				users[i].Status = *input.Status
+			}
+
+			if input.Role != nil {
+				users[i].Role = strings.ToUpper(*input.Role)
 			}
 
 			if input.Password != nil {
