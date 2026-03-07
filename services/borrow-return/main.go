@@ -22,7 +22,7 @@ import (
 type BorrowEvent struct {
 	BorrowID  string    `json:"borrow_id"`
 	UserID    string    `json:"user_id"`
-	BookID    string    `json:"book_id"`
+	Barcode   string    `json:"barcode"`
 	CreatedAt time.Time `json:"created_at"`
 	DueDate   time.Time `json:"due_date"`
 }
@@ -30,7 +30,7 @@ type BorrowEvent struct {
 type ReturnEvent struct {
 	BorrowID   string    `json:"borrow_id"`
 	UserID     string    `json:"user_id"`
-	BookID     string    `json:"book_id"`
+	Barcode    string    `json:"barcode"`
 	ReturnDate time.Time `json:"return_date"`
 	DaysLate   int       `json:"days_late"`
 }
@@ -115,9 +115,9 @@ func callAPIWithBreaker(cb *gobreaker.CircuitBreaker, url string, serviceName st
 }
 
 // check book | call book catalog service
-func isBookAvailable(bookID string) (bool, error) {
+func isBookAvailable(Barcode string) (bool, error) {
 	var err error
-	url := fmt.Sprintf("http://book-catalog:8082/books/%s/status", bookID)
+	url := fmt.Sprintf("http://book-catalog:8082/copies/%s/status", Barcode)
 
 	body, err := callAPIWithBreaker(catalogCB, url, "Book Catalog")
 	if err != nil {
@@ -151,6 +151,24 @@ func verifyUser(userID string) (*UserVerifyResponse, error) {
 	return &result, nil
 }
 
+func connectRabbitMQ() (*amqp.Connection, error) {
+	var conn *amqp.Connection
+	var err error
+
+	for i := 0; i < 10; i++ {
+		conn, err = amqp.Dial("amqp://guest:guest@rabbitmq:5672/")
+		if err == nil {
+			log.Println("Successfully connected to RabbitMQ!")
+			return conn, nil
+		}
+
+		log.Printf("Failed to connect to RabbitMQ (attempt %d/10): %v. Retrying in 3 seconds...", i+1, err)
+		time.Sleep(3 * time.Second)
+	}
+
+	return nil, fmt.Errorf("could not connect to RabbitMQ after 10 attempts: %v", err)
+}
+
 func main() {
 	// connect mongoDB
 	collection, err := connectMongo()
@@ -159,9 +177,9 @@ func main() {
 	}
 
 	// connect rabbitMQ
-	conn, err := amqp.Dial("amqp://guest:guest@rabbitmq:5672/")
+	conn, err := connectRabbitMQ()
 	if err != nil {
-		log.Fatalf("Failed to connect to RabbitMQ: %v", err)
+		log.Fatalf("Fatal: %v", err)
 	}
 	defer conn.Close()
 
@@ -184,8 +202,8 @@ func main() {
 	//borrow book
 	r.POST("/borrows", func(c *gin.Context) {
 		var req struct {
-			UserID string `json:"user_id" binding:"required"`
-			BookID string `json:"book_id" binding:"required"`
+			UserID  string `json:"user_id" binding:"required"`
+			Barcode string `json:"barcode" binding:"required"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -245,10 +263,16 @@ func main() {
 		}
 
 		// check book availability
-		// if !isBookAvailable(req.BookID) {
-		// 	c.JSON(400, gin.H{"error": "หนังสือเล่มนี้ถูกยืมไปแล้ว หรือไม่พร้อมให้บริการ"})
-		// 	return
-		// }
+		isAvailable, err := isBookAvailable(req.Barcode)
+		if err != nil {
+			log.Printf("err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !isAvailable {
+			c.JSON(400, gin.H{"error": "หนังสือเล่มนี้ถูกยืมไปแล้ว หรือไม่พร้อมให้บริการ"})
+			return
+		}
 
 		// save db
 		now := time.Now()
@@ -261,7 +285,7 @@ func main() {
 		newBorrow := dbmodel.Borrow{
 			BorrowID:   borrowID,
 			UserID:     req.UserID,
-			BookID:     req.BookID,
+			Barcode:    req.Barcode,
 			BorrowDate: now,
 			DueDate:    dueDate,
 			Status:     "BORROWED",
@@ -279,7 +303,7 @@ func main() {
 		event := BorrowEvent{
 			BorrowID:  borrowID,
 			UserID:    req.UserID,
-			BookID:    req.BookID,
+			Barcode:   req.Barcode,
 			CreatedAt: now,
 			DueDate:   dueDate,
 		}
@@ -352,7 +376,7 @@ func main() {
 		event := ReturnEvent{
 			BorrowID:   borrow.BorrowID,
 			UserID:     borrow.UserID,
-			BookID:     borrow.BookID,
+			Barcode:    borrow.Barcode,
 			ReturnDate: now,
 			DaysLate:   daysLate,
 		}
