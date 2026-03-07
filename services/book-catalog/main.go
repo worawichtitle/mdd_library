@@ -433,6 +433,22 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"message": "Copy updated successfully", "copy": copy})
 	})
 
+	// check status of specific copy
+	r.GET("/copies/:barcode/status", func(c *gin.Context) {
+		barcode := c.Param("barcode")
+
+		dbMu.RLock()
+		defer dbMu.RUnlock()
+
+		copy, exists := copiesDB[barcode]
+		if !exists {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Copy not found"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"status": copy.Status})
+	})
+	
 	log.Println("Book Catalog Service running on port 8082...")
 	r.Run(":8082")
 }
