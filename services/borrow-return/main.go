@@ -14,6 +14,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/hashicorp/consul/api"
 	gonanoid "github.com/matoous/go-nanoid/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sony/gobreaker"
 	"go.mongodb.org/mongo-driver/bson"
@@ -100,7 +102,28 @@ func discoverServiceURL(serviceName string) (string, error) {
 var userCB *gobreaker.CircuitBreaker
 var catalogCB *gobreaker.CircuitBreaker
 
-// setting ciruit breaker
+var (
+	// นับจำนวน request ทั้งหมด
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "borrow_return_service_http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "path", "status"},
+	)
+
+	// จับเวลา
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "borrow_return_service_request_duration_seconds",
+			Help:    "Response time duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path"},
+	)
+)
+
+// setting ciruit breaker and register metrics
 func init() {
 	settings := gobreaker.Settings{
 		MaxRequests: 1,                // Half-Open: ให้ผ่าน 1 request เพื่อ test
@@ -120,6 +143,10 @@ func init() {
 	// cb book catalog service
 	settings.Name = "Book-Service-CB"
 	catalogCB = gobreaker.NewCircuitBreaker(settings)
+
+	// register metrics with Prometheus
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(requestDuration)
 }
 
 // retry with circuit breaker
@@ -166,6 +193,27 @@ func callAPIWithBreaker(cb *gobreaker.CircuitBreaker, url string, serviceName st
 	}
 
 	return nil, finalErr
+}
+
+func PrometheusMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+
+		// เก็บ stat
+		duration := time.Since(start).Seconds()
+		status := fmt.Sprintf("%d", c.Writer.Status())
+		method := c.Request.Method
+
+		path := c.FullPath()
+		if path == "" {
+			path = "unknown"
+		}
+
+		// บันทึก stat
+		httpRequestsTotal.WithLabelValues(method, path, status).Inc()
+		requestDuration.WithLabelValues(method, path).Observe(duration)
+	}
 }
 
 // check book | call book catalog service
@@ -265,7 +313,13 @@ func main() {
 
 	r := gin.Default()
 
+	r.Use(PrometheusMiddleware())
+
 	// endpoint
+
+	// metrics
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
 	//borrow book
 	r.POST("/borrows", func(c *gin.Context) {
 		var req struct {

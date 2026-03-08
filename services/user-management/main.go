@@ -11,6 +11,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/hashicorp/consul/api"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -56,6 +58,55 @@ func registerWithConsul() {
 		log.Fatalf("Failed to register service: %v", err)
 	}
 	log.Println("Successfully registered with Consul Service Discovery")
+}
+
+var (
+	// นับจำนวน request ทั้งหมด
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "user_management_service_http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "path", "status"},
+	)
+
+	// จับเวลา
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "user_management_service_request_duration_seconds",
+			Help:    "Response time duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path"},
+	)
+)
+
+// register metrics
+func init() {
+	// register metrics with Prometheus
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(requestDuration)
+}
+
+func PrometheusMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+
+		// เก็บ stat
+		duration := time.Since(start).Seconds()
+		status := fmt.Sprintf("%d", c.Writer.Status())
+		method := c.Request.Method
+
+		path := c.FullPath()
+		if path == "" {
+			path = "unknown"
+		}
+
+		// บันทึก stat
+		httpRequestsTotal.WithLabelValues(method, path, status).Inc()
+		requestDuration.WithLabelValues(method, path).Observe(duration)
+	}
 }
 
 var filePath = "db/user.json"
@@ -111,15 +162,20 @@ func main() {
 	}
 
 	r := gin.Default()
+	r.Use(PrometheusMiddleware())
+
+	// metrics
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
 	api := r.Group("/user")
 	// Grouping routes เพื่อความเป็นระเบียบ (http://localhost:8083/user/...)
 	{
-		api.GET("", GetUsers)              // ดูทั้งหมด
-		api.GET("/:id", GetUserByID)       // ดูรายคน
-		api.GET("/:id/verify", VerifyUser) // ตรวจสอบผู้ใช้
-		api.POST("", CreateUser)           // เพิ่มคนใหม่
-		api.PUT("/:id", UpdateUser)        // แก้ไขข้อมูล
-		api.DELETE("/:id", DeleteUser)     // ลบข้อมูล
+		api.GET("", GetUsers)                              // ดูทั้งหมด
+		api.GET("/:id", GetUserByID)                       // ดูรายคน
+		api.GET("/:id/verify", VerifyUser)                 // ตรวจสอบผู้ใช้
+		api.POST("", CreateUser)                           // เพิ่มคนใหม่
+		api.PUT("/:id", UpdateUser)                        // แก้ไขข้อมูล
+		api.DELETE("/:id", DeleteUser)                     // ลบข้อมูล
 	}
 
 	r.Run(":8083")
