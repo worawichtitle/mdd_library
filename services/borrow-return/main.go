@@ -388,6 +388,22 @@ func main() {
 		}
 
 		// check book availability
+		activeBorrowCount, err := collection.CountDocuments(ctxDB, bson.M{
+			"barcode": req.Barcode,
+			"status":  "BORROWED",
+		})
+		if err != nil {
+			log.Printf("err: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if activeBorrowCount > 0 {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": "หนังสือเล่มนี้ถูกยืมไปแล้ว",
+			})
+			return
+		}
+		
 		isAvailable, err := isBookAvailable(req.Barcode)
 		if err != nil {
 			log.Printf("err: %v", err)
