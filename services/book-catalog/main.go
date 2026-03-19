@@ -139,22 +139,25 @@ func loadData() {
 	log.Println("Loaded data successfully.")
 }
 
-func saveData() {
+func saveData() error {
 	// Save Books
 	booksData, err := json.MarshalIndent(booksDB, "", "  ")
-	if err == nil {
-		os.WriteFile(booksFile, booksData, 0644)
-	} else {
-		log.Printf("Error saving books: %v", err)
+	if err != nil {
+		return fmt.Errorf("error marshaling books: %v", err)
+	}
+	if err := os.WriteFile(booksFile, booksData, 0644); err != nil {
+		return fmt.Errorf("error writing books file: %v", err)
 	}
 
 	// Save Copies
 	copiesData, err := json.MarshalIndent(copiesDB, "", "  ")
-	if err == nil {
-		os.WriteFile(copiesFile, copiesData, 0644)
-	} else {
-		log.Printf("Error saving copies: %v", err)
+	if err != nil {
+		return fmt.Errorf("error marshaling copies: %v", err)
 	}
+	if err := os.WriteFile(copiesFile, copiesData, 0644); err != nil {
+		return fmt.Errorf("error writing copies file: %v", err)
+	}
+	return nil
 }
 
 func generateISBN() string {
@@ -240,7 +243,7 @@ func setupRabbitMQConsumer() {
 	// 2. Listen for Returns
 	ch.QueueBind(q.Name, "borrow.returned", "borrow_events", false, nil)
 
-	msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
+	msgs, err := ch.Consume(q.Name, "", false, false, false, false, nil)
 	if err != nil {
 		log.Println("Failed to register consumer")
 		return
@@ -254,6 +257,9 @@ func setupRabbitMQConsumer() {
 				Barcode string `json:"barcode"`
 			}
 			if err := json.Unmarshal(d.Body, &event); err != nil {
+				log.Printf("RabbitMQ Error: Invalid JSON: %v", err)
+				// requeue = false
+				d.Nack(false, false)
 				continue
 			}
 
@@ -276,10 +282,18 @@ func setupRabbitMQConsumer() {
 
 				// Save the updated copy back to the database
 				copiesDB[event.Barcode] = copy
-				saveData()
+				err := saveData()
 
+				if err != nil {
+					log.Printf("RabbitMQ Error saving data: %v. Requeueing message...", err)
+					// requeue = true
+					d.Nack(false, true) 
+				} else {
+					d.Ack(false)
+				}
 			} else {
 				log.Printf("RabbitMQ Error: Barcode '%s' not found in inventory", event.Barcode)
+				d.Nack(false, false)
 			}
 			dbMu.Unlock()
 		}
