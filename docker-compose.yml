@@ -19,9 +19,12 @@ services:
       - "8081:8081"
     restart: always
     depends_on:
-      - mongodb
-      - rabbitmq
-      - consul
+      rabbitmq:
+        condition: service_healthy
+      consul:
+        condition: service_started
+      mongodb:
+        condition: service_started
     networks:
       - library-net
 
@@ -31,8 +34,10 @@ services:
         - "8082:8082"
       restart: always
       depends_on:
-      - rabbitmq
-      - consul
+        rabbitmq:
+          condition: service_healthy
+        consul:
+          condition: service_started
       networks:
         - library-net
 
@@ -42,8 +47,10 @@ services:
         - "8083:8083"
       restart: always
       depends_on:
-      - rabbitmq
-      - consul
+        rabbitmq:
+          condition: service_healthy
+        consul:
+          condition: service_started
       networks:
         - library-net
   consul:
@@ -67,6 +74,12 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks:
       - library-net
 
