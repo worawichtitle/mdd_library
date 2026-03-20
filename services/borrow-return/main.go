@@ -612,6 +612,7 @@ func GetBorrows(c *gin.Context) {
 	// query
 	userID := c.Query("user_id")
 	status := c.Query("status")
+	barcode := c.Query("barcode")
 	isOverdue := c.Query("overdue")
 	filter := bson.M{}
 	if userID != "" {
@@ -619,6 +620,9 @@ func GetBorrows(c *gin.Context) {
 	}
 	if status != "" {
 		filter["status"] = status
+	}
+	if barcode != ""{
+		filter["barcode"] = barcode
 	}
 	if isOverdue == "true" || isOverdue == "false" {
 		filter["status"] = "BORROWED"
