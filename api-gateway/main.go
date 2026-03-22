@@ -3,11 +3,13 @@ package main
 import (
 	"fmt"
 	"log"
+	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hashicorp/consul/api"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -61,22 +63,56 @@ func PrometheusMiddleware() gin.HandlerFunc {
 	}
 }
 
-const (
-	BorrowServiceURL  = "http://borrow-return:8081"
-	CatalogServiceURL = "http://book-catalog:8082"
-	UserServiceURL    = "http://user-management:8083"
-)
+func discoverServiceURL(serviceName string) (string, error) {
+	config := api.DefaultConfig()
+	config.Address = "consul:8500"
+	client, err := api.NewClient(config)
+	if err != nil {
+		return "", err
+	}
+
+	// ค้นหา service จากชื่อ
+	services, _, err := client.Catalog().Service(serviceName, "", nil)
+	if err != nil {
+		return "", err
+	}
+
+	if len(services) == 0 {
+		return "", fmt.Errorf("service '%s' not found in Consul", serviceName)
+	}
+
+	service := services[0]
+	url := fmt.Sprintf("http://%s:%d", service.ServiceAddress, service.ServicePort)
+	return url, nil
+}
+
 
 // Reverse Proxy
-func reverseProxy(target string) gin.HandlerFunc {
-	targetURL, _ := url.Parse(target)
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-
+func reverseProxy(serviceName string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// ถาม consul
+		targetURLStr, err := discoverServiceURL(serviceName)
+		if err != nil {
+			log.Printf("Service Discovery Error [%s]: %v", serviceName, err)
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": fmt.Sprintf("ระบบ %s ไม่พร้อมให้บริการในขณะนี้", serviceName),
+			})
+			return
+		}
+
+		targetURL, _ := url.Parse(targetURLStr)
+		proxy := httputil.NewSingleHostReverseProxy(targetURL)
+
+		// อัปเดต header
+		c.Request.URL.Host = targetURL.Host
+		c.Request.URL.Scheme = targetURL.Scheme
+		c.Request.Header.Set("X-Forwarded-Host", c.Request.Header.Get("Host"))
+		c.Request.Host = targetURL.Host
+
+		// forward rquest
 		proxy.ServeHTTP(c.Writer, c.Request)
 	}
 }
-
 func main() {
 	r := gin.Default()
 	r.Use(PrometheusMiddleware())
@@ -84,17 +120,17 @@ func main() {
 	// metrics
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
-	r.Any("/user", reverseProxy(UserServiceURL))
-	r.Any("/user/*filepath", reverseProxy(UserServiceURL))
+	r.Any("/user", reverseProxy("user-management-service"))
+	r.Any("/user/*filepath", reverseProxy("user-management-service"))
 
-	r.Any("/books", reverseProxy(CatalogServiceURL))
-	r.Any("/books/*filepath", reverseProxy(CatalogServiceURL))
+	r.Any("/books", reverseProxy("book-catalog-service"))
+	r.Any("/books/*filepath", reverseProxy("book-catalog-service"))
 
-	r.Any("/copies", reverseProxy(CatalogServiceURL))
-	r.Any("/copies/*any", reverseProxy(CatalogServiceURL))
+	r.Any("/copies", reverseProxy("book-catalog-service"))
+	r.Any("/copies/*any", reverseProxy("book-catalog-service"))
 
-	r.Any("/borrows", reverseProxy(BorrowServiceURL))
-	r.Any("/borrows/*filepath", reverseProxy(BorrowServiceURL))
+	r.Any("/borrows", reverseProxy("borrow-return-service"))
+	r.Any("/borrows/*filepath", reverseProxy("borrow-return-service"))
 
 	log.Println("API Gateway is running on port 8000...")
 	r.Run(":8000")
