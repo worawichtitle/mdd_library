@@ -286,7 +286,6 @@ func connectRabbitMQ() (*amqp.Connection, error) {
 	return nil, fmt.Errorf("could not connect to RabbitMQ after 10 attempts: %v", err)
 }
 
-
 // ==========================================
 // Main
 // ==========================================
@@ -342,7 +341,6 @@ func main() {
 	log.Println("Borrow Service is running on port 8081...")
 	r.Run(":8081")
 }
-
 
 // ==========================================
 // POST /borrows
@@ -512,7 +510,6 @@ func CreateBorrow(c *gin.Context) {
 	})
 }
 
-
 // ==========================================
 // POST /borrows/:id/return
 // Return book
@@ -533,9 +530,12 @@ func ReturnBorrow(c *gin.Context) {
 	}
 
 	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	due := time.Date(borrow.DueDate.Year(), borrow.DueDate.Month(), borrow.DueDate.Day(), 0, 0, 0, 0, borrow.DueDate.Location())
+
 	daysLate := 0
-	if now.After(borrow.DueDate) {
-		duration := now.Sub(borrow.DueDate)
+	if today.After(due) {
+		duration := today.Sub(due)
 		daysLate = int(duration.Hours() / 24)
 	}
 
@@ -603,7 +603,6 @@ func ReturnBorrow(c *gin.Context) {
 	})
 }
 
-
 // ==========================================
 // GET /borrows
 // Get borrows
@@ -621,7 +620,7 @@ func GetBorrows(c *gin.Context) {
 	if status != "" {
 		filter["status"] = status
 	}
-	if barcode != ""{
+	if barcode != "" {
 		filter["barcode"] = barcode
 	}
 	if isOverdue == "true" || isOverdue == "false" {
@@ -660,7 +659,6 @@ func GetBorrows(c *gin.Context) {
 
 	c.JSON(http.StatusOK, borrows)
 }
-
 
 // ==========================================
 // GET /borrows/:id
