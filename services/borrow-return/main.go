@@ -446,7 +446,14 @@ func CreateBorrow(c *gin.Context) {
 
 	// save db
 	now := time.Now()
-	dueDate := now.AddDate(0, 0, borrowDays)
+	targetDate := now.AddDate(0, 0, borrowDays)
+	dueDate := time.Date(
+		targetDate.Year(),
+		targetDate.Month(),
+		targetDate.Day(),
+		23, 59, 59, 0,
+		now.Location(),
+	)
 
 	alphabet := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	id, _ := gonanoid.Generate(alphabet, 10)
@@ -504,9 +511,10 @@ func CreateBorrow(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"message":   "ยืมหนังสือสำเร็จ",
-		"borrow_id": borrowID,
-		"due_date":  dueDate.Format("2006-01-02"),
+		"message":     "ยืมหนังสือสำเร็จ",
+		"borrow_id":   borrowID,
+		"borrow_date": now,
+		"due_date":    dueDate,
 	})
 }
 
@@ -530,8 +538,11 @@ func ReturnBorrow(c *gin.Context) {
 	}
 
 	now := time.Now()
+	localZone := now.Location()
+	localDueDate := borrow.DueDate.In(localZone)
+
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	due := time.Date(borrow.DueDate.Year(), borrow.DueDate.Month(), borrow.DueDate.Day(), 0, 0, 0, 0, borrow.DueDate.Location())
+	due := time.Date(localDueDate.Year(), localDueDate.Month(), localDueDate.Day(), 0, 0, 0, 0, localZone)
 
 	daysLate := 0
 	if today.After(due) {

@@ -18,6 +18,8 @@ services:
     ports:
       - "8081:8081"
     restart: always
+    environment:
+      - TZ=Asia/Bangkok
     depends_on:
       rabbitmq:
         condition: service_healthy
