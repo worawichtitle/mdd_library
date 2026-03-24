@@ -1,9 +1,8 @@
 {
   "1": {
-    "id": "1",
+    "isbn": "",
     "title": "Harry Potter",
-    "author": "J.K. Rowling",
-    "status": "available"
+    "author": "J.K. Rowling"
   },
   "2": {
     "id": "2",
