@@ -448,10 +448,22 @@ func main() {
 			return
 		}
 
+		validStatuses := map[string]bool{"available": true, "borrowed": true, "lost": true, "maintenance": true}
+		validConditions := map[string]bool{"new": true, "good": true, "damaged": true}
+
 		if status, ok := updateData["status"]; ok {
+			if !validStatuses[status] {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid status value. Allowed: available, borrowed, lost, maintenance"})
+				return
+			}
 			copy.Status = status
 		}
+
 		if condition, ok := updateData["condition"]; ok {
+			if !validConditions[condition] {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid condition value. Allowed: new, good, damaged"})
+				return
+			}
 			copy.Condition = condition
 		}
 
