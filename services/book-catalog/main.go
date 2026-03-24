@@ -196,10 +196,23 @@ func main() {
 		}
 
 		dbMu.Lock()
+		defer dbMu.Unlock()
+
+		// Loop check for duplicate title (case-insensitive)
+		for _, existingBook := range booksDB {
+			if strings.EqualFold(existingBook.Title, newBook.Title) {
+				c.JSON(http.StatusConflict, gin.H{
+					"error": "Book catalog with this title already exists",
+					"isbn":  existingBook.ISBN, // Return the existing ISBN
+				})
+				return 
+			}
+		}
+
+		// IF no duplicate title, generate new ISBN and save
 		newBook.ISBN = generateISBN()
 		booksDB[newBook.ISBN] = newBook
 		saveData()
-		dbMu.Unlock()
 
 		c.JSON(http.StatusCreated, gin.H{"message": "Book catalog added", "book": newBook})
 	})
