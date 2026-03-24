@@ -2,22 +2,27 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"fmt"
+	"time"
+
 	// "strconv"
 	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hashicorp/consul/api"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
 type Book struct {
 	ISBN   string `json:"isbn"`
-	Title  string `json:"title"`
-	Author string `json:"author"`
+	Title  string `json:"title" binding:"required"`
+	Author string `json:"author" binding:"required"`
 }
 
 type BookCopy struct {
@@ -31,6 +36,78 @@ type BookResponse struct {
 	Book
 	AvailableStock int `json:"available_stock"`
 	TotalStock     int `json:"total_stock"`
+}
+
+// service discovery - register
+func registerWithConsul() {
+	config := api.DefaultConfig()
+	config.Address = "consul:8500"
+	client, err := api.NewClient(config)
+	if err != nil {
+		log.Fatalf("Failed to connect to Consul: %v", err)
+	}
+
+	registration := &api.AgentServiceRegistration{
+		ID:      "book-catalog-service-1",
+		Name:    "book-catalog-service",
+		Port:    8082,
+		Address: "book-catalog",
+	}
+
+	err = client.Agent().ServiceRegister(registration)
+	if err != nil {
+		log.Fatalf("Failed to register service: %v", err)
+	}
+	log.Println("Successfully registered with Consul Service Discovery")
+}
+
+var (
+	// นับจำนวน request ทั้งหมด
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "book_catalog_service_http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "path", "status"},
+	)
+
+	// จับเวลา
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "book_catalog_service_request_duration_seconds",
+			Help:    "Response time duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path"},
+	)
+)
+
+// register metrics
+func init() {
+	// register metrics with Prometheus
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(requestDuration)
+}
+
+func PrometheusMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+
+		// เก็บ stat
+		duration := time.Since(start).Seconds()
+		status := fmt.Sprintf("%d", c.Writer.Status())
+		method := c.Request.Method
+
+		path := c.FullPath()
+		if path == "" {
+			path = "unknown"
+		}
+
+		// บันทึก stat
+		httpRequestsTotal.WithLabelValues(method, path, status).Inc()
+		requestDuration.WithLabelValues(method, path).Observe(duration)
+	}
 }
 
 var (
@@ -62,22 +139,25 @@ func loadData() {
 	log.Println("Loaded data successfully.")
 }
 
-func saveData() {
+func saveData() error {
 	// Save Books
 	booksData, err := json.MarshalIndent(booksDB, "", "  ")
-	if err == nil {
-		os.WriteFile(booksFile, booksData, 0644)
-	} else {
-		log.Printf("Error saving books: %v", err)
+	if err != nil {
+		return fmt.Errorf("error marshaling books: %v", err)
+	}
+	if err := os.WriteFile(booksFile, booksData, 0644); err != nil {
+		return fmt.Errorf("error writing books file: %v", err)
 	}
 
 	// Save Copies
 	copiesData, err := json.MarshalIndent(copiesDB, "", "  ")
-	if err == nil {
-		os.WriteFile(copiesFile, copiesData, 0644)
-	} else {
-		log.Printf("Error saving copies: %v", err)
+	if err != nil {
+		return fmt.Errorf("error marshaling copies: %v", err)
 	}
+	if err := os.WriteFile(copiesFile, copiesData, 0644); err != nil {
+		return fmt.Errorf("error writing copies file: %v", err)
+	}
+	return nil
 }
 
 func generateISBN() string {
@@ -118,21 +198,52 @@ func generateBarcode() string {
 // RabbitMQ Consumer
 
 func setupRabbitMQConsumer() {
-	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
+	var conn *amqp.Connection
+	var err error
+
+	for i := 0; i < 10; i++ {
+		conn, err = amqp.Dial("amqp://guest:guest@rabbitmq:5672/")
+		if err == nil {
+			log.Println("Catalog Service successfully connected to RabbitMQ!")
+			break
+		}
+
+		log.Printf("Catalog trying to connect RabbitMQ (attempt %d/10)...", i+1)
+		time.Sleep(3 * time.Second)
+	}
+
 	if err != nil {
-		log.Println("Warning: Could not connect to RabbitMQ.")
+		log.Printf("Failed to connect to RabbitMQ after retries: %v", err)
 		return
 	}
-	ch, _ := conn.Channel()
-	q, _ := ch.QueueDeclare("book_status_queue", true, false, false, false, nil)
-	
+
+	ch, err := conn.Channel()
+	if err != nil {
+		log.Printf("RabbitMQ Channel Error: %v", err)
+		return
+	}
+	err = ch.ExchangeDeclare(
+		"borrow_events",
+		"topic",
+		true, false, false, false, nil,
+	)
+	if err != nil {
+		log.Printf("Exchange Declare Error: %v", err)
+		return
+	}
+	q, err := ch.QueueDeclare("book_status_queue", true, false, false, false, nil)
+	if err != nil {
+		log.Printf("Queue Declare Error: %v", err)
+		return
+	}
+
 	// 1. Listen for Borrows
 	ch.QueueBind(q.Name, "borrow.created", "borrow_events", false, nil)
-	
-	// 2. Listen for Returns
-	ch.QueueBind(q.Name, "return.created", "borrow_events", false, nil)
 
-	msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
+	// 2. Listen for Returns
+	ch.QueueBind(q.Name, "borrow.returned", "borrow_events", false, nil)
+
+	msgs, err := ch.Consume(q.Name, "", false, false, false, false, nil)
 	if err != nil {
 		log.Println("Failed to register consumer")
 		return
@@ -146,12 +257,15 @@ func setupRabbitMQConsumer() {
 				Barcode string `json:"barcode"`
 			}
 			if err := json.Unmarshal(d.Body, &event); err != nil {
+				log.Printf("RabbitMQ Error: Invalid JSON: %v", err)
+				// requeue = false
+				d.Nack(false, false)
 				continue
 			}
 
 			dbMu.Lock()
 			if copy, exists := copiesDB[event.Barcode]; exists {
-				
+
 				// Check which event we just received from RabbitMQ
 				if d.RoutingKey == "borrow.created" {
 					if copy.Status == "available" {
@@ -160,7 +274,7 @@ func setupRabbitMQConsumer() {
 					} else {
 						log.Printf("RabbitMQ Warning: Barcode '%s' is already %s!", event.Barcode, copy.Status)
 					}
-				} else if d.RoutingKey == "return.created" {
+				} else if d.RoutingKey == "borrow.returned" {
 					// If it's a return event, make the book available again
 					copy.Status = "available"
 					log.Printf("RabbitMQ Event: Barcode '%s' returned and is now available", event.Barcode)
@@ -168,10 +282,18 @@ func setupRabbitMQConsumer() {
 
 				// Save the updated copy back to the database
 				copiesDB[event.Barcode] = copy
-				saveData()
-				
+				err := saveData()
+
+				if err != nil {
+					log.Printf("RabbitMQ Error saving data: %v. Requeueing message...", err)
+					// requeue = true
+					d.Nack(false, true) 
+				} else {
+					d.Ack(false)
+				}
 			} else {
 				log.Printf("RabbitMQ Error: Barcode '%s' not found in inventory", event.Barcode)
+				d.Nack(false, false)
 			}
 			dbMu.Unlock()
 		}
@@ -181,11 +303,21 @@ func setupRabbitMQConsumer() {
 // Main Application
 
 func main() {
+	// register consul
+	registerWithConsul()
+
 	loadData()
 
 	setupRabbitMQConsumer()
 
 	r := gin.Default()
+
+	r.Use(PrometheusMiddleware())
+
+	// endpoint
+
+	// metrics
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	// Add Book
 	r.POST("/books", func(c *gin.Context) {
@@ -226,7 +358,7 @@ func main() {
 		for _, book := range booksDB {
 			available := 0
 			total := 0
-			
+
 			// นับ stock สดๆ จากตาราง Copies
 			for _, copy := range copiesDB {
 				if copy.ISBN == book.ISBN {
@@ -266,7 +398,7 @@ func main() {
 	// add physical copy of book
 	r.POST("/copies", func(c *gin.Context) {
 		var newCopy BookCopy
-		
+
 		if err := c.ShouldBindJSON(&newCopy); err != nil || newCopy.ISBN == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid input, ISBN required to link copy to a book"})
 			return
@@ -406,7 +538,7 @@ func main() {
 		for _, book := range booksDB {
 			if strings.Contains(strings.ToLower(book.Title), query) ||
 				strings.Contains(strings.ToLower(book.Author), query) {
-				
+
 				// นับ stock สำหรับเล่มที่ค้นเจอ
 				available := 0
 				total := 0

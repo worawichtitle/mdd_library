@@ -1,18 +1,67 @@
 version: '3.9'
 
 services:
+  api-gateway:
+      build: ./api-gateway
+      ports:
+        - "8000:8000"
+      depends_on:
+        - borrow-return
+        - book-catalog
+        - user-management
+        - consul
+      networks:
+        - library-net
 
   borrow-return:
     build: ./services/borrow-return
     ports:
       - "8081:8081"
     restart: always
+    environment:
+      - TZ=Asia/Bangkok
     depends_on:
-      - mongodb
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
+      consul:
+        condition: service_started
+      mongodb:
+        condition: service_started
     networks:
       - library-net
 
+  book-catalog:
+      build: ./services/book-catalog
+      ports:
+        - "8082:8082"
+      restart: always
+      depends_on:
+        rabbitmq:
+          condition: service_healthy
+        consul:
+          condition: service_started
+      networks:
+        - library-net
+
+  user-management:
+      build: ./services/user-management
+      ports:
+        - "8083:8083"
+      restart: always
+      depends_on:
+        rabbitmq:
+          condition: service_healthy
+        consul:
+          condition: service_started
+      networks:
+        - library-net
+  consul:
+    image: hashicorp/consul:latest
+    ports:
+      - "8500:8500"
+    command: "agent -dev -client 0.0.0.0"
+    networks:
+      - library-net
   mongodb:
     image: mongo:7
     ports:
@@ -27,8 +76,39 @@ services:
     ports:
       - "5672:5672"
       - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     networks:
       - library-net
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - library-net
+    depends_on:
+      - api-gateway
+      - borrow-return
+      - book-catalog
+      - user-management
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    networks:
+      - library-net
+    depends_on:
+      - prometheus
 
 networks:
   library-net:

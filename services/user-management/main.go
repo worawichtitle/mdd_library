@@ -2,30 +2,111 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/hashicorp/consul/api"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"golang.org/x/crypto/bcrypt"
 )
 
 // User struct สำหรับเก็บข้อมูลผู้ใช้
 type User struct {
 	UserID    string `json:"user_id"`
-	Name      string `json:"name"`
-	Email     string `json:"email"`
-	Password  string `json:"password"`
+	Name      string `json:"name" binding:"required"`
+	Email     string `json:"email" binding:"required,email"`
+	Password  string `json:"password" binding:"required"`
 	Status    string `json:"status"` // ACTIVE, SUSPENDED
+	Role      string `json:"role"`   // GUEST, STUDENT, TEACHER, STAFF
 	CreatedAt string `json:"created_at"`
 }
 
 // สำหรับรับข้อมูลที่ต้องการเก็บ ไม่ต้องเปลี่ยนทุกตัว
 type UpdateUserInput struct {
-	Name     *string `json:"name"`
-	Email    *string `json:"email"`
-	Password *string `json:"password"`
-	Status   *string `json:"status"`
+	Name     *string `json:"name" binding:"omitempty"`
+	Email    *string `json:"email" binding:"omitempty,email"`
+	Password *string `json:"password" binding:"omitempty"`
+	Role     *string `json:"role" binding:"omitempty"`
+	Status   *string `json:"status" binding:"omitempty"`
+}
+
+// service discovery - register
+func registerWithConsul() {
+	config := api.DefaultConfig()
+	config.Address = "consul:8500"
+	client, err := api.NewClient(config)
+	if err != nil {
+		log.Fatalf("Failed to connect to Consul: %v", err)
+	}
+
+	registration := &api.AgentServiceRegistration{
+		ID:      "user-management-service-1",
+		Name:    "user-management-service",
+		Port:    8083,
+		Address: "user-management",
+	}
+
+	err = client.Agent().ServiceRegister(registration)
+	if err != nil {
+		log.Fatalf("Failed to register service: %v", err)
+	}
+	log.Println("Successfully registered with Consul Service Discovery")
+}
+
+var (
+	// นับจำนวน request ทั้งหมด
+	httpRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "user_management_service_http_requests_total",
+			Help: "Total number of HTTP requests",
+		},
+		[]string{"method", "path", "status"},
+	)
+
+	// จับเวลา
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "user_management_service_request_duration_seconds",
+			Help:    "Response time duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method", "path"},
+	)
+)
+
+// register metrics
+func init() {
+	// register metrics with Prometheus
+	prometheus.MustRegister(httpRequestsTotal)
+	prometheus.MustRegister(requestDuration)
+}
+
+func PrometheusMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+
+		// เก็บ stat
+		duration := time.Since(start).Seconds()
+		status := fmt.Sprintf("%d", c.Writer.Status())
+		method := c.Request.Method
+
+		path := c.FullPath()
+		if path == "" {
+			path = "unknown"
+		}
+
+		// บันทึก stat
+		httpRequestsTotal.WithLabelValues(method, path, status).Inc()
+		requestDuration.WithLabelValues(method, path).Observe(duration)
+	}
 }
 
 var filePath = "db/user.json"
@@ -48,19 +129,56 @@ func writeUsers(users []User) error {
 	return os.WriteFile(filePath, data, 0644)
 }
 
+func generateNextID(users []User) string {
+	maxID := 0
+
+	for _, u := range users {
+		var id int
+		fmt.Sscanf(u.UserID, "U%d", &id)
+		if id > maxID {
+			maxID = id
+		}
+	}
+	return fmt.Sprintf("U%d", maxID+1)
+}
+
 func main() {
-	r := gin.Default()
-	api := r.Group("/user")
-	// Grouping routes เพื่อความเป็นระเบียบ (http://localhost:8082/user/...)
-	{
-		api.GET("", GetUsers)          // ดูทั้งหมด
-		api.GET("/:id", GetUserByID)   // ดูรายคน
-		api.POST("", CreateUser)       // เพิ่มคนใหม่
-		api.PATCH("/:id", UpdateUser)  // แก้ไขข้อมูล
-		api.DELETE("/:id", DeleteUser) // ลบข้อมูล
+	// register consul
+	registerWithConsul()
+
+	// set up RabbitMQ
+	conn, err := amqp.Dial("amqp://guest:guest@rabbitmq:5672/")
+	if err != nil {
+		log.Printf("RabbitMQ not available, continuing without events: %v", err)
+	} else {
+		defer conn.Close()
+		ch, err := conn.Channel()
+		if err != nil {
+			log.Printf("Failed to open channel: %v", err)
+		} else {
+			defer ch.Close()
+			go listenToBorrowEvents(ch) // start consumer goroutine
+		}
 	}
 
-	r.Run(":8082")
+	r := gin.Default()
+	r.Use(PrometheusMiddleware())
+
+	// metrics
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
+
+	api := r.Group("/user")
+	// Grouping routes เพื่อความเป็นระเบียบ (http://localhost:8083/user/...)
+	{
+		api.GET("", GetUsers)                              // ดูทั้งหมด
+		api.GET("/:id", GetUserByID)                       // ดูรายคน
+		api.GET("/:id/verify", VerifyUser)                 // ตรวจสอบผู้ใช้
+		api.POST("", CreateUser)                           // เพิ่มคนใหม่
+		api.PUT("/:id", UpdateUser)                        // แก้ไขข้อมูล
+		api.DELETE("/:id", DeleteUser)                     // ลบข้อมูล
+	}
+
+	r.Run(":8083")
 }
 
 // GET /user
@@ -90,6 +208,27 @@ func GetUserByID(c *gin.Context) {
 	c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 }
 
+// GET /user/:id/verify
+func VerifyUser(c *gin.Context) {
+	id := c.Param("id")
+	users, err := readUsers()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read users"})
+		return
+	}
+	for _, user := range users {
+		if user.UserID == id {
+			if user.Status == "ACTIVE" {
+				c.JSON(http.StatusOK, gin.H{"valid": true, "role": user.Role})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"valid": false})
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+}
+
 // POST /user
 func CreateUser(c *gin.Context) {
 	var newUser User                                   // รับข้อมูล user ใหม่
@@ -105,15 +244,30 @@ func CreateUser(c *gin.Context) {
 	}
 	newUser.Password = string(hashed)
 
-	// กำหนดค่าอัตโนมัติ
-	newUser.Status = "ACTIVE"
-	newUser.CreatedAt = time.Now().UTC().Format(time.RFC3339)
-
 	users, err := readUsers() // อ่านข้อมูลผู้ใช้ทั้งหมด
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read users"})
 		return
 	}
+	// ตรวจ email ซ้ำ
+	for _, user := range users {
+		if user.Email == newUser.Email {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Email already exists"})
+			return
+		}
+	}
+
+	// กำหนดค่าอัตโนมัติ
+	newUser.UserID = generateNextID(users)
+	newUser.Status = "ACTIVE"
+	newUser.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	if newUser.Role == "" {
+		newUser.Role = "GUEST"
+	} else {
+		newUser.Role = strings.ToUpper(newUser.Role)
+	}
+
+	// เพิ่มผู้ใช้
 	users = append(users, newUser)
 	err = writeUsers(users)
 	if err != nil {
@@ -123,7 +277,7 @@ func CreateUser(c *gin.Context) {
 	c.JSON(http.StatusCreated, newUser)
 }
 
-// PATCH /user/:id
+// PUT /user/:id
 func UpdateUser(c *gin.Context) {
 	id := c.Param("id")
 	var input UpdateUserInput
@@ -147,11 +301,21 @@ func UpdateUser(c *gin.Context) {
 			}
 
 			if input.Email != nil {
+				for _, user := range users {
+					if user.Email == *input.Email {
+						c.JSON(http.StatusBadRequest, gin.H{"error": "Email already exists"})
+						return
+					}
+				}
 				users[i].Email = *input.Email
 			}
 
 			if input.Status != nil {
-				users[i].Status = *input.Status
+				users[i].Status = strings.ToUpper(*input.Status)
+			}
+
+			if input.Role != nil {
+				users[i].Role = strings.ToUpper(*input.Role)
 			}
 
 			if input.Password != nil {
@@ -193,4 +357,26 @@ func DeleteUser(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+}
+
+// สำหรับฟัง event การยืมหนังสือจาก RabbitMQ
+func listenToBorrowEvents(ch *amqp.Channel) {
+	q, err := ch.QueueDeclare("", false, true, true, false, nil)
+	if err != nil {
+		log.Printf("queue declare error: %v", err)
+		return
+	}
+	if err = ch.QueueBind(q.Name, "borrow.*", "borrow_events", false, nil); err != nil {
+		log.Printf("queue bind error: %v", err)
+		return
+	}
+	msgs, err := ch.Consume(q.Name, "", true, false, false, false, nil)
+	if err != nil {
+		log.Printf("consume error: %v", err)
+		return
+	}
+	for msg := range msgs {
+		log.Printf("borrow event received: %s", msg.Body)
+		// TODO: update user record if needed
+	}
 }

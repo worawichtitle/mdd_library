@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:8000']
+
+  - job_name: 'borrow-return-service'
+    static_configs:
+      - targets: ['borrow-return:8081']
+
+  - job_name: 'book-catalog-service'
+    static_configs:
+      - targets: ['book-catalog:8082']
+
+  - job_name: 'user-management-service'
+    static_configs:
+      - targets: ['user-management:8083']

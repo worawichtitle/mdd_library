@@ -5,7 +5,7 @@ import "time"
 type Borrow struct {
 	BorrowID   string     `bson:"borrow_id"`
 	UserID     string     `bson:"user_id"`
-	BookID     string     `bson:"book_id"`
+	Barcode    string     `bson:"barcode"`
 	BorrowDate time.Time  `bson:"borrow_date"`
 	DueDate    time.Time  `bson:"due_date"`
 	ReturnDate *time.Time `bson:"return_date"`
@@ -19,7 +19,7 @@ type Borrow struct {
 //   "_id": ObjectId,
 //   "borrow_id": "BR001",
 //   "user_id": "U001",
-//   "book_id": "B001",
+//   "barcode": "B001",
 //   "borrow_date": "2026-02-20T10:00:00Z",
 //   "due_date": "2026-02-27T10:00:00Z",
 //   "return_date": null,
