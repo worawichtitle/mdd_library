@@ -1,80 +1,86 @@
-# 📚 Library Management System (Microservices)
+# 📚 ระบบจัดการห้องสมุด (Library Management System)
 
-โปรเจคนี้เป็นระบบจัดการห้องสมุด (Library Management System) ที่พัฒนาด้วยสถาปัตยกรรม **Microservices** เพื่อแยกการทำงานของแต่ละระบบออกจากกัน และรองรับการขยายตัวของระบบ (Scalability)
-
----
-
-## 🛠️ เทคโนโลยีที่ใช้
-
-* Microservices Architecture
-* RESTful API (GET, POST, PUT, DELETE)
-* Database (JSON / MongoDB)
-* Postman (สำหรับทดสอบ API)
-* Docker (ถ้ามี)
+โปรเจคนี้เป็นระบบจัดการห้องสมุด (Library Management System) ที่พัฒนาด้วยสถาปัตยกรรม **Microservices** โดยใช้ภาษา **Go (Golang)** และเทคโนโลยีที่ทันสมัยเพื่อรองรับการขยายตัว (Scalability) และความทนทาน (Resilience) ของระบบ
 
 ---
 
-## 🧩 โครงสร้างระบบ
+## 🛠️ เทคนิคและเทคโนโลยีที่ใช้ในโปรเจค
 
-ระบบแบ่งออกเป็น 3 Microservices หลัก:
+1. **Microservices Architecture**: ระบบถูกแบ่งออกเป็น 3 เซอร์วิสหลักที่ทำงานแยกจากกันอย่างชัดเจน
+   - **User Management Service** (Port `8083`): จัดการข้อมูลผู้ใช้งาน การสร้าง แก้ไข ลบ และดูข้อมูลผู้ใช้
+   - **Book Catalog Service** (Port `8082`): จัดการข้อมูลหนังสือ เล่มหนังสือ การค้นหา และสถานะเล่มหนังสือ
+   - **Borrow-Return Service** (Port `8081`): ดูแลตรรกะการยืม-คืนหนังสือ ตรวจสอบสถานะการยืม และจัดการประวัติการยืม
 
-### 👤 User Management Service
+2. **Go & Gin Framework**:
+   - ตัวระบบถูกพัฒนาด้วยภาษา Go ซึ่งโดดเด่นด้วยความเร็ว และการใช้ทรัพยากรน้อย
+   - รัน Web Service และจัดการ Routing ของ RESTful API ด้วยโมดูล `gin-gonic/gin`
 
-จัดการข้อมูลผู้ใช้งาน เช่น
+3. **MongoDB**:
+   - เป็น NoSQL Database ที่ใช้จัดการข้อมูลประวัติการยืม
+   - มีความยืดหยุ่นสูง เหมาะสำหรับการจัดเก็บข้อมูลอย่างหลากหลาย
 
-* สร้างผู้ใช้
-* แก้ไขข้อมูล
-* ลบผู้ใช้
-* ดูข้อมูลผู้ใช้
+4. **JSON Data Storage**:
+   - ใช้ไฟล์ JSON สำหรับเก็บข้อมูลหนังสือ เล่มหนังสือ และบัญชีผู้ใช้
+   - มีการจัดการข้อมูลอย่างเป็นระบบผ่าน in-memory storage
+
+5. **RabbitMQ (Message Broker)**:
+   - ใช้เป็นตัวกลางช่วยให้สามารถสื่อสารแบบ Asynchronous (Event-driven) ระหว่างเซอร์วิส
+   - ช่วยลดคอขวดสะสมเมื่อมีคำร้องขอเข้ามาเยอะๆ พร้อมกัน
+
+6. **Service Discovery (Consul)**:
+   - นำ **HashiCorp Consul** เพื่อใช้เป็น Service Discovery ช่วยให้ Microservices สามารถค้นหาและเชื่อมต่อกันได้
+   - ทำ Health Check ตรวจสอบสถานะของแต่ละเซอร์วิส
+
+7. **Monitoring & Observability (ตรวจวัดสถานะระบบ)**:
+   - **Prometheus** (Port `9090`): คอยดึงข้อมูล (Scrape) metrics เช่น Request Count และ Latency ของแต่ละ Services
+   - **Grafana** (Port `3000`): ระบบแสดงผล Visualize ข้อมูลให้อยู่ในรูปแบบ Dashboard ที่สวยงามและอัปเดตแบบเรียลไทม์
+
+8. **Docker & Docker Compose**:
+   - ควบคุมทุก Environment ให้อยู่ข้างในระบบ Containerization
+   - มีการบิวต์ Docker ด้วยแนวคิด **Multi-stage Build** ซึ่งทำให้ขนาดของ Image file สุดท้ายเล็กและปลอดภัย
+   - ผสานการสั่งการทุกคอนเทนเนอร์เข้าด้วยกันพร้อมระบบ Network ที่เชื่อมกันผ่านคำสั่ง `docker compose`
 
 ---
 
-### 📖 Book Catalog Service
+## 🚀 คู่มือการใช้งาน
 
-จัดการข้อมูลหนังสือและเล่มหนังสือ เช่น
 
-* เพิ่ม/แก้ไข/ลบ หนังสือ
-* ค้นหาหนังสือ
-* จัดการ copy (เล่มจริง)
+### 1. การเริ่มต้นใช้งาน
 
----
+สิ่งที่จำเป็นต้องติดตั้งก่อนใช้งาน:
 
-### 🔄 Borrow Service
+- **Go (Golang)**
+- **Docker**
 
-จัดการการยืม-คืนหนังสือ เช่น
+### 2. การเปิดและรันระบบ
 
-* ยืมหนังสือ
-* คืนหนังสือ
-* ตรวจสอบสถานะ
-
----
-
-## 🚀 วิธีการใช้งาน
-
-### 1. เริ่มต้นระบบ
+โคลนโปรเจค และใช้งาน Docker Compose เพื่อเริ่มใช้งาน:
 
 ```bash
-git clone <your-repo-url>
-cd <your-project>
+git clone https://github.com/worawichtitle/mdd_library.git
+
+cd mdd_library
 ```
 
-(ถ้ามี Docker)
+สร้าง Docker Containers และเริ่มระบบทั้งหมด:
 
 ```bash
 docker compose up -d --build
 ```
 
+### 3. การทดสอบยิง API (ผ่าน Postman, cURL หรือ Thunder Client)
+
+หลังจากระบบเริ่มต้นสำเร็จ สามารถทดสอบยิง API คร่าวๆ ได้ดังนี้:
+
 ---
 
-### 2. ทดสอบ API (ผ่าน Postman)
+## 🌐 User Management Service API
 
----
 
-## 👤 User Management Service API
-
-* สร้างผู้ใช้
-  `POST /users`
-
+**สร้างผู้ใช้ใหม่**
+```
+POST http://localhost:8000/user
+```
 ```json
 {
   "name": "John Doe",
@@ -83,37 +89,39 @@ docker compose up -d --build
 }
 ```
 
-* ดูผู้ใช้ทั้งหมด
-  `GET /users`
+**ดูผู้ใช้ทั้งหมด**
+```
+GET http://localhost:8000/user
+```
 
-* ดูผู้ใช้รายบุคคล
-  `GET /users/:id`
+**ดูผู้ใช้รายบุคคล**
+```
+GET http://localhost:8000/user/:user_id
+```
 
-* แก้ไขผู้ใช้
-  `PUT /users/:id`
+**ดูผู้ใช้รายบุคคล**
+```
+GET http://localhost:8000/user/:user_id/verify
+```
 
-* ลบผู้ใช้
-  `DELETE /users/:id`
+**แก้ไขข้อมูลผู้ใช้**
+```
+PUT http://localhost:8000/user/:user_id
+```
+
+**ลบผู้ใช้**
+```
+DELETE http://localhost:8000/user/:user_id
+```
 
 ---
 
 ## 📖 Book Catalog Service API
 
-* ดูหนังสือทั้งหมด
-  `GET /books`
-
-* ค้นหาหนังสือ
-  `GET /books/search?q=keyword`
-
-* ดู copies ของหนังสือ
-  `GET /books/:isbn/copies`
-
-* ตรวจสอบสถานะหนังสือ
-  `GET /copies/:barcode/status`
-
-* เพิ่มหนังสือ
-  `POST /books`
-
+**เพิ่มหนังสือใหม่**
+```
+POST http://localhost:8000/books
+```
 ```json
 {
   "title": "Clean Code",
@@ -121,78 +129,126 @@ docker compose up -d --build
 }
 ```
 
-* เพิ่มเล่มหนังสือ
-  `POST /copies`
-
+**เพิ่มเล่มหนังสือ (Copy)**
+```
+POST http://localhost:8000/copies
+```
 ```json
 {
-  "isbn": "123456",
-  "barcode": "BC001"
+  "isbn": "ISBN-1",
+  "status": "available",
+  "condition": "new"
 }
 ```
 
-* แก้ไขหนังสือ
-  `PUT /books/:isbn`
+**ดูหนังสือทั้งหมด**
+```
+GET http://localhost:8000/books
+```
 
-* แก้ไขเล่มหนังสือ
-  `PUT /copies/:barcode`
+**ค้นหาหนังสือจากชื่อ**
+```
+GET http://localhost:8000/books/search?q=
+```
 
-* ลบหนังสือ
-  `DELETE /books/:isbn`
+**ดู Copies ของหนังสือ**
+```
+GET http://localhost:8000/books/:isbn/copies
+```
 
-* ลบเล่มหนังสือ
-  `DELETE /copies/:barcode`
+**ตรวจสอบสถานะเล่มหนังสือ**
+```
+GET http://localhost:8000/copies/:barcode/status
+```
+
+**แก้ไขข้อมูลหนังสือ**
+```
+PUT http://localhost:8000/books/:isbn
+```
+
+**แก้ไขข้อมูลเล่มหนังสือ**
+```
+PUT http://localhost:8000/copies/:barcode
+```
+
+**ลบหนังสือ** (ต้องไม่มีเล่มหนังสือเหลืออยู่)
+```
+DELETE http://localhost:8000/books/:isbn
+```
+
+**ลบเล่มหนังสือ**
+```
+DELETE http://localhost:8000/copies/:barcode
+```
 
 ---
 
-## 🔄 Borrow Service API
+## 🔄 Borrow-Return Service API
 
-* ยืมหนังสือ
-  `POST /borrow`
-
+**ยืมหนังสือ**
+```
+POST http://localhost:8000/borrows
+```
 ```json
 {
   "user_id": "U1",
-  "barcode": "BC001"
+  "barcode": "BC-1"
 }
 ```
 
-* คืนหนังสือ
-  `POST /return`
+**คืนหนังสือ**
+```
+POST http://localhost:8000/return
+```
+```json
+{
+  "borrow_id": "BRW-1"
+}
+```
 
-* ตรวจสอบสถานะการยืม
-  `GET /borrow/:id`
+**ดูประวัติการยืมทั้งหมด**
+```
+GET http://localhost:8000/borrows
+```
 
----
+**ดูประวัติการยืมทั้งหมดของ user**
+```
+GET http://localhost:8000/borrows/?user_id=
+```
 
-## 🧪 Testing
+**ดูประวัติการยืมทั้งหมดที่มีสถานะตามกำหนด** (BORROWED, RETURNED)
+```
+GET http://localhost:8000/borrows/?status=
+```
 
-ระบบถูกทดสอบโดยใช้:
+**ดูประวัติการยืมทั้งหมดที่เกินเวลาคืน** (true, false)
+```
+GET http://localhost:8000/borrows/?overdue=
+```
 
-* API Testing (Postman)
-* Functional Testing
-* Error Handling Testing
+**ดูประวัติการยืมตาม barcode หนังสือ**
+```
+GET http://localhost:8000/borrows/?barcode=	
+```
 
-### ✔ ตัวอย่าง Test Case
+**ดูประวัติการยืมอันเดียว**
+```
+GET http://localhost:8000/borrows/:borrow_id
+```
 
-* สร้าง user สำเร็จ
-* สร้าง user email ซ้ำ
-* ยืมหนังสือสำเร็จ
-* ยืมหนังสือที่ถูกยืมแล้ว
-* ลบหนังสือที่ยังมี copy
 
 ---
 
 ## 📂 Database Design
 
-### 👤 User
+### 👤 User Schema
 
 ```json
 {
   "user_id": "U1",
   "name": "John Doe",
   "email": "john.doe@gmail.com",
-  "password": "asd",
+  "password": "hashed_password",
   "status": "ACTIVE",
   "role": "STAFF",
   "created_at": "2026-03-01T10:00:00Z"
@@ -201,25 +257,41 @@ docker compose up -d --build
 
 ---
 
-### 📖 Book
+### 📖 Book Schema
 
 ```json
 {
-  "isbn": "123456",
+  "isbn": "ISBN-1",
   "title": "Clean Code",
-  "author": "Robert C. Martin"
+  "author": "Robert C. Martin",
+  "available_stock": 1,
+  "total_stock": 1
 }
 ```
 
----
-
-### 📦 Copy
+### 📦 Book Copy Schema
 
 ```json
 {
+  "barcode": "BC-1",
+  "isbn": "ISBN-1",
+  "status": "available",
+  "condition": "good"
+}
+```
+---
+
+### 🔖 Borrow Record Schema
+
+```json
+{
+  "borrow_id": "BR001",
+  "user_id": "U1",
   "barcode": "BC001",
-  "isbn": "123456",
-  "status": "AVAILABLE"
+  "borrow_date": "2026-03-01T10:00:00Z",
+  "due_date": "2026-03-15T10:00:00Z",
+  "return_date": null,
+  "status": "BORROWED"
 }
 ```
 
@@ -227,18 +299,79 @@ docker compose up -d --build
 
 ## ⚠️ Business Rules
 
-* ไม่สามารถยืมหนังสือที่ถูกยืมไปแล้ว
-* ไม่สามารถลบหนังสือ หากยังมี copy อยู่
-* email ของ user ต้องไม่ซ้ำ
-* barcode ของหนังสือต้องไม่ซ้ำ
+* 📌 ไม่สามารถยืมหนังสือที่ถูกยืมไปแล้ว (สถานะต้องเป็น available)
+* 📌 user ยืมหนังสือได้ไม่เกินจำนวนที่ role กำหนด
+* 📌 ไม่สามารถลบหนังสือ หากยังมี copy อยู่
+* 📌 Email ของ user ต้องไม่ซ้ำ
+* 📌 Barcode ของเล่มหนังสือต้องไม่ซ้ำ
+* 📌 ผู้ใช้ต้องมีอยู่ในระบบก่อนการยืมหนังสือ
 
 ---
 
-## 🧹 ปิดระบบ
+## 📊 การตั้งค่า Monitoring (Prometheus & Grafana)
+
+### 4.1 สร้างข้อมูล Traffic
+
+ให้เรียกไปที่ API ต่างๆ ของระบบ เพื่อสร้างข้อมูล Metrics:
+
+```bash
+curl -X GET http://localhost:8000/user
+curl -X GET http://localhost:8000/books
+curl -X GET http://localhost:8000/borrows
+```
+
+Refresh API endpoints หลายๆ ครั้ง (แนะนำ 5-10 รอบ) เพื่อสร้าง Traffic
+
+### 4.2 ตั้งค่าการดึงข้อมูลใน Grafana
+
+1. เปิด Browser เข้าไปที่ `http://localhost:3000` (Grafana)
+2. ใส่ User: `admin` และ Pass: `admin`
+3. ในหน้าแรก ไปที่ **Connections** > เลือก **Data Sources**
+4. คลิก **Add data source**
+5. เลือก **Prometheus**
+6. ในช่อง Prometheus server URL: ใส่ `http://prometheus:9090/`
+7. เลื่อนลงมาด้านล่างสุดและกดปุ่ม **Save & test**
+
+### 4.3 สร้าง Dashboard เพื่อดูกราฟ
+
+1. ที่เมนูด้านซ้าย เลือกไอคอน **+** > คลิก **Dashboard**
+2. เลือก **Add visualization** และเลือก Data source Prometheus
+3. ในช่อง Metrics ลองใส่ Query ต่อไปนี้:
+
+**Request Rate (คำขอต่อนาที):**
+```promql
+rate(http_requests_total[1m])
+```
+
+**Response Time (เวลาการตอบสนอง):**
+```promql
+rate(http_request_duration_seconds_sum[1m]) / rate(http_request_duration_seconds_count[1m])
+```
+
+4. กดปุ่ม **Run query** เพื่อดูกราฟข้อมูล
+
+---
+
+## 🧰 เครื่องมือช่วยเหลืออื่นๆ
+
+- 📈 **Prometheus UI**: `http://localhost:9090`
+- 🐇 **RabbitMQ Management**: `http://localhost:15672` (User: guest / Pass: guest)
+- 🟢 **Consul UI**: `http://localhost:8500`
+- 🍃 **MongoDB Express** (ถ้าติดตั้ง): `http://localhost:8081`
+
+---
+
+## 🧹 การปิดการทำงานของระบบ
+
+หลังทดสอบเสร็จแล้ว ให้ใช้คำสั่ง:
 
 ```bash
 docker compose down -v
 ```
+
+คำสั่งนี้จะ:
+- ปิด Containers ทั้งหมด
+- ลบ Volumes ทั้งหมด (ข้อมูลในฐานข้อมูลจะถูกลบ)
 
 ---
 
